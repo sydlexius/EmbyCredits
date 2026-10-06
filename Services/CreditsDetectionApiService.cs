@@ -19,7 +19,7 @@ namespace EmbyCredits.Services
         public CreditsDetectionApiService(ILibraryManager libraryManager, ILogManager logManager)
         {
             _libraryManager = libraryManager;
-            _logger = logManager.GetLogger(GetType().Name);
+            _logger = logManager.GetLogger($"[EmbyCredits] {GetType().Name}");
         }
 
         private string FormatTime(double seconds) => ItemLookupHelper.FormatTime(seconds);

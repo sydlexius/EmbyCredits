@@ -44,7 +44,6 @@ namespace EmbyCredits.Services.DetectionMethods
                 }
                 catch
                 {
-                    // Wait for already-scheduled tasks so they release the semaphore before it's disposed
                     try { await Task.WhenAll(tasks).ConfigureAwait(false); } catch { }
                     throw;
                 }
@@ -138,8 +137,8 @@ namespace EmbyCredits.Services.DetectionMethods
                 bool found = false;
                 foreach (var l2Lower in set2Lower)
                 {
-                    if (l2Lower.Contains(lineLower, StringComparison.Ordinal) ||
-                        lineLower.Contains(l2Lower, StringComparison.Ordinal))
+                    if (l2Lower.IndexOf(lineLower, StringComparison.Ordinal) >= 0 ||
+                        lineLower.IndexOf(l2Lower, StringComparison.Ordinal) >= 0)
                     {
                         found = true;
                         break;

@@ -6,8 +6,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
-using System.Text.Json;
-using System.Text.Json.Serialization;
+using EmbyCredits.Services.Utilities;
 
 namespace EmbyCredits.Services
 {
@@ -18,12 +17,6 @@ namespace EmbyCredits.Services
 
         private ConcurrentDictionary<string, PendingEntry> _pending =
             new ConcurrentDictionary<string, PendingEntry>(StringComparer.OrdinalIgnoreCase);
-
-        private static readonly JsonSerializerOptions _jsonOptions = new JsonSerializerOptions
-        {
-            WriteIndented = true,
-            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
-        };
 
         public PendingEpisodesService(ILogger logger, string dataFolderPath)
         {
@@ -56,7 +49,6 @@ namespace EmbyCredits.Services
             }
         }
 
-        /// <summary>Called after detection has run (success or failure).</summary>
         public void MarkProcessed(string episodeId)
         {
             try
@@ -73,7 +65,6 @@ namespace EmbyCredits.Services
             }
         }
 
-        /// <summary>Returns all pending episode IDs.</summary>
         public List<string> GetPendingEpisodeIds()
         {
             return _pending.Keys.ToList();
@@ -87,7 +78,7 @@ namespace EmbyCredits.Services
                     return;
 
                 var json = File.ReadAllText(_stateFilePath);
-                var entries = JsonSerializer.Deserialize<List<PendingEntry>>(json, _jsonOptions);
+                var entries = SimpleJson.Deserialize<List<PendingEntry>>(json);
                 if (entries == null) return;
 
                 _pending = new ConcurrentDictionary<string, PendingEntry>(
@@ -113,7 +104,7 @@ namespace EmbyCredits.Services
                     var dir = Path.GetDirectoryName(_stateFilePath);
                     if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                         Directory.CreateDirectory(dir);
-                    File.WriteAllText(_stateFilePath, JsonSerializer.Serialize(entries, _jsonOptions));
+                    File.WriteAllText(_stateFilePath, SimpleJson.Serialize(entries, indented: true));
                 }
                 catch (Exception ex)
                 {

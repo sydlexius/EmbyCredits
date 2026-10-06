@@ -33,6 +33,7 @@
         
         instance.progressInterval = setInterval(() => {
             ApiClient.getJSON(ApiClient.getUrl('CreditsDetector/GetProgress')).then(progress => {
+                instance.progressPollFailures = 0;
                 instance.lastProgress = progress;
                 
                 if (!progress.IsRunning && !instance.hasCompleted) {
@@ -65,9 +66,13 @@
                 updateProgressUI(view, progress);
                 updateResults(view, progress, instance.isDryRun);
             }).catch(error => {
+                instance.progressPollFailures = (instance.progressPollFailures || 0) + 1;
                 console.error('Error fetching progress:', error);
-                clearInterval(instance.progressInterval);
-                instance.progressInterval = null;
+                if (instance.progressPollFailures >= 10) {
+                    console.error('Progress polling failed 10 times in a row, giving up.');
+                    clearInterval(instance.progressInterval);
+                    instance.progressInterval = null;
+                }
             });
         }, 500);
     }
@@ -168,6 +173,10 @@
         }
     }
     
+    function byEpisodeName([a], [b]) {
+        return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
+    }
+
     function updateResults(view, progress, isDryRun = false) {
         const skipDetails = view.querySelector('#skipDetails');
         const skipList = view.querySelector('#skipList');
@@ -176,10 +185,13 @@
         const successDetails = view.querySelector('#successDetails');
         const successList = view.querySelector('#successList');
         
-        if (progress.SkipReasons && Object.keys(progress.SkipReasons).length > 0) {
+        const visibleSkipReasons = progress.SkipReasons
+            ? Object.entries(progress.SkipReasons).filter(([, reason]) => reason !== 'Only needed for audio comparison').sort(byEpisodeName)
+            : [];
+        if (visibleSkipReasons.length > 0) {
             skipDetails.style.display = 'block';
             skipList.innerHTML = '';
-            Object.entries(progress.SkipReasons).forEach(([episode, reason]) => {
+            visibleSkipReasons.forEach(([episode, reason]) => {
                 const item = document.createElement('div');
                 item.style.cssText = 'padding: 0.5em; margin-bottom: 0.5em;';
                 const appliedRule = progress.AppliedRules && progress.AppliedRules[episode];
@@ -194,7 +206,7 @@
         if (progress.FailureReasons && Object.keys(progress.FailureReasons).length > 0) {
             failureDetails.style.display = 'block';
             failureList.innerHTML = '';
-            Object.entries(progress.FailureReasons).forEach(([episode, reason]) => {
+            Object.entries(progress.FailureReasons).sort(byEpisodeName).forEach(([episode, reason]) => {
                 const item = document.createElement('div');
                 item.style.cssText = 'padding: 0.5em; margin-bottom: 0.5em;';
                 const appliedRule = progress.AppliedRules && progress.AppliedRules[episode];
@@ -209,12 +221,10 @@
         if (progress.SuccessDetails && Object.keys(progress.SuccessDetails).length > 0) {
             successDetails.style.display = 'block';
             successList.innerHTML = '';
-            Object.entries(progress.SuccessDetails).forEach(([episode, successDetail]) => {
+            Object.entries(progress.SuccessDetails).sort(byEpisodeName).forEach(([episode, successDetail]) => {
                 const item = document.createElement('div');
                 item.style.cssText = 'padding: 0.5em; margin-bottom: 0.5em; display: flex; align-items: center; gap: 1em;';
                 
-                // Extract just the timestamp from the beginning of the success detail string
-                // Format is "HH:MM:SS [Method] - details..." or "MM:SS [Method] - details..."
                 const timestampMatch = successDetail.match(/^(\d{1,2}:\d{2}(?::\d{2})?)/);
                 const timestamp = timestampMatch ? timestampMatch[1] : '';
                 

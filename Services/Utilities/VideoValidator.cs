@@ -40,19 +40,20 @@ namespace EmbyCredits.Services.Utilities
                     CreateNoWindow = true,
                     WindowStyle = ProcessWindowStyle.Hidden
                 };
-                processStartInfo.ArgumentList.Add("-v");
-                processStartInfo.ArgumentList.Add("error");
-                processStartInfo.ArgumentList.Add("-probesize");
-                processStartInfo.ArgumentList.Add("5000000");
-                processStartInfo.ArgumentList.Add("-analyzeduration");
-                processStartInfo.ArgumentList.Add("1000000");
-                processStartInfo.ArgumentList.Add("-select_streams");
-                processStartInfo.ArgumentList.Add("v:0");
-                processStartInfo.ArgumentList.Add("-show_entries");
-                processStartInfo.ArgumentList.Add("stream=codec_name,codec_type,duration");
-                processStartInfo.ArgumentList.Add("-of");
-                processStartInfo.ArgumentList.Add("default=noprint_wrappers=1");
-                processStartInfo.ArgumentList.Add(normalizedPath);
+                processStartInfo.ArgumentList().Add("-v");
+                processStartInfo.ArgumentList().Add("error");
+                processStartInfo.ArgumentList().Add("-probesize");
+                processStartInfo.ArgumentList().Add("5000000");
+                processStartInfo.ArgumentList().Add("-analyzeduration");
+                processStartInfo.ArgumentList().Add("1000000");
+                processStartInfo.ArgumentList().Add("-select_streams");
+                processStartInfo.ArgumentList().Add("v:0");
+                processStartInfo.ArgumentList().Add("-show_entries");
+                processStartInfo.ArgumentList().Add("stream=codec_name,codec_type,duration");
+                processStartInfo.ArgumentList().Add("-of");
+                processStartInfo.ArgumentList().Add("default=noprint_wrappers=1");
+                FFmpegHelper.AddStrmNetworkResilienceArgs(processStartInfo, videoPath, normalizedPath, _configuration);
+                processStartInfo.ArgumentList().Add(normalizedPath);
 
                 var outputBuilder = new StringBuilder();
                 var errorBuilder = new StringBuilder();
@@ -80,6 +81,7 @@ namespace EmbyCredits.Services.Utilities
 
                     try
                     {
+                        processStartInfo.ApplyArgumentList();
                         process.Start();
                         process.BeginOutputReadLine();
                         process.BeginErrorReadLine();
@@ -122,9 +124,9 @@ namespace EmbyCredits.Services.Utilities
 
                         if (!string.IsNullOrEmpty(errors))
                         {
-                            if (errors.Contains("Invalid data found", StringComparison.OrdinalIgnoreCase) ||
-                                errors.Contains("moov atom not found", StringComparison.OrdinalIgnoreCase) ||
-                                errors.Contains("could not find codec", StringComparison.OrdinalIgnoreCase))
+                            if (errors.IndexOf("Invalid data found", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                errors.IndexOf("moov atom not found", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                errors.IndexOf("could not find codec", StringComparison.OrdinalIgnoreCase) >= 0)
                             {
                                 _logger?.Warn($"Video appears corrupted: {videoPath} - {errors.Trim()}");
                                 return (false, $"Video file appears corrupted: {errors.Trim()}");

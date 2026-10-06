@@ -1,11 +1,12 @@
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Model.Logging;
 using System;
+using System.Collections.Generic;
 using System.Net.Http;
-using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Web;
+using EmbyCredits.Services.Utilities;
 
 namespace EmbyCredits.Services
 {
@@ -149,26 +150,22 @@ namespace EmbyCredits.Services
         {
             try
             {
-                using var doc = JsonDocument.Parse(json);
-                var root = doc.RootElement;
-
-                if (!root.TryGetProperty("credits", out var creditsArray))
+                var root = SimpleJson.Parse(json) as Dictionary<string, object?>;
+                if (root == null || !root.TryGetValue("credits", out var creditsValue))
                     return null;
 
-                if (creditsArray.ValueKind != JsonValueKind.Array)
+                if (creditsValue is not List<object?> creditsArray)
                     return null;
 
-                foreach (var segment in creditsArray.EnumerateArray())
+                foreach (var segment in creditsArray)
                 {
-                    if (!segment.TryGetProperty("start_ms", out var startMsElement))
+                    if (segment is not Dictionary<string, object?> segmentObj)
                         continue;
 
-                    if (startMsElement.ValueKind == JsonValueKind.Null)
+                    if (!segmentObj.TryGetValue("start_ms", out var startMsValue) || startMsValue == null)
                         continue;
 
-                    if (!startMsElement.TryGetInt64(out var startMs))
-                        continue;
-
+                    var startMs = Convert.ToInt64(startMsValue, System.Globalization.CultureInfo.InvariantCulture);
                     if (startMs <= 0)
                         continue;
 
@@ -185,7 +182,7 @@ namespace EmbyCredits.Services
 
                 return null;
             }
-            catch (JsonException ex)
+            catch (SimpleJsonException ex)
             {
                 if (_configuration.EnableDetailedLogging)
                     _logger.Debug($"[TheIntroDB] JSON parse error: {ex.Message}");

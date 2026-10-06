@@ -10,9 +10,10 @@ namespace EmbyCredits.Services
     public class DebugLogger : IDisposable
     {
         private readonly ILogger _logger;
-        private readonly PluginConfiguration _configuration;
+        private PluginConfiguration _configuration;
+        private readonly object _sync = new object();
         private StringBuilder? _debugLog;
-        private bool _isDebugMode;
+        private volatile bool _isDebugMode;
         private const int MaxDebugLogSize = 10 * 1024 * 1024;
         private System.Threading.CancellationTokenSource? _cleanupCts;
         private bool _disposed = false;
@@ -27,8 +28,30 @@ namespace EmbyCredits.Services
 
         public bool IsDebugMode => _isDebugMode;
 
+        public void SetConfiguration(PluginConfiguration configuration)
+        {
+            if (configuration == null)
+                return;
+
+            lock (_sync)
+            {
+                _configuration = configuration;
+            }
+        }
+
         public void StartDebugMode()
         {
+            lock (_sync)
+            {
+                StartDebugModeLocked();
+            }
+        }
+
+        private void StartDebugModeLocked()
+        {
+            _cleanupCts?.Cancel();
+            CloseLogFileWriter();
+
             _debugLog = new StringBuilder();
             var header = new StringBuilder();
             header.AppendLine("=".PadRight(80, '='));
@@ -103,7 +126,9 @@ namespace EmbyCredits.Services
                 _debugLog.AppendLine($"  Correlation Window (seconds):     {_configuration.CorrelationWindowSeconds}");
                 _debugLog.AppendLine();
 
-                if (_configuration.DetectionMode == DetectionMode.OcrOnly || _configuration.DetectionMode == DetectionMode.OcrWithHashFallback)
+                if (_configuration.DetectionMode == DetectionMode.OcrOnly ||
+                    _configuration.DetectionMode == DetectionMode.OcrWithHashFallback ||
+                    _configuration.DetectionMode == DetectionMode.HashWithOcrFallback)
                 {
                     _debugLog.AppendLine("OCR DETECTION SETTINGS");
                     _debugLog.AppendLine("-".PadRight(80, '-'));
@@ -118,6 +143,7 @@ namespace EmbyCredits.Services
                     _debugLog.AppendLine($"  Max Frames to Process:            {(_configuration.OcrMaxFramesToProcess > 0 ? _configuration.OcrMaxFramesToProcess.ToString() : "Unlimited")}");
                     _debugLog.AppendLine($"  Max Analysis Duration (sec):      {_configuration.OcrMaxAnalysisDuration:F1}");
                     _debugLog.AppendLine($"  JPEG Quality:                     {_configuration.OcrJpegQuality}");
+                    _debugLog.AppendLine($"  HDR Tone Mapping:                 {_configuration.OcrEnableHdrToneMapping}");
                     _debugLog.AppendLine($"  Max Resolution Height:            {_configuration.OcrMaxResolutionHeight}");
                     _debugLog.AppendLine($"  Delay Between Frames (ms):        {_configuration.OcrDelayBetweenFramesMs}");
                     _debugLog.AppendLine($"  Minimum Confidence:               {_configuration.OcrMinimumConfidence:F2}");
@@ -248,6 +274,19 @@ namespace EmbyCredits.Services
                     _debugLog.AppendLine($"  Silence Min Duration:             {_configuration.ChromaprintSilenceMinDuration:F1}");
                     _debugLog.AppendLine($"  Min Confidence:                   {_configuration.ChromaprintMinConfidence:F2}");
                     _debugLog.AppendLine($"  Stop Seconds from End:            {_configuration.ChromaprintStopSecondsFromEnd:F1}");
+                    _debugLog.AppendLine($"  Use Multi-Peer Consensus:         {_configuration.ChromaprintUseMultiPeerConsensus}");
+                    if (_configuration.ChromaprintUseMultiPeerConsensus)
+                    {
+                        _debugLog.AppendLine($"    Consensus Peer Count:           {_configuration.ChromaprintConsensusPeerCount}");
+                    }
+                    _debugLog.AppendLine($"  Reject Repeating Segments:        {_configuration.ChromaprintRejectRepeatingSegments}");
+                    if (_configuration.ChromaprintRejectRepeatingSegments)
+                    {
+                        _debugLog.AppendLine($"    Repeating Segment Threshold:    {_configuration.ChromaprintRepeatingSegmentThreshold:F2}");
+                        _debugLog.AppendLine($"    Repeating Segment Check (s):    {_configuration.ChromaprintRepeatingSegmentCheckSeconds:F0}");
+                    }
+                    _debugLog.AppendLine($"  Use Boundary Search:              {_configuration.ChromaprintUseBoundarySearch}");
+                    _debugLog.AppendLine($"  Use Sub-Frame Interpolation:      {_configuration.ChromaprintUseSubFrameInterpolation}");
                     _debugLog.AppendLine($"  Lower Process Priority:           {_configuration.ChromaprintLowerProcessPriority}");
                     _debugLog.AppendLine($"  FFmpeg Threads:                   {(_configuration.ChromaprintFfmpegThreads > 0 ? _configuration.ChromaprintFfmpegThreads.ToString() : "Auto")}");
                     _debugLog.AppendLine($"  Delay Between Operations (ms):    {_configuration.ChromaprintDelayBetweenOperationsMs}");
@@ -272,6 +311,7 @@ namespace EmbyCredits.Services
                     _debugLog.AppendLine($"  Scan All Frames:                  {_configuration.BlackFrameScanAllFrames}");
                     _debugLog.AppendLine($"  Auto-Fallback to All Frames:      {_configuration.BlackFrameAutoFallbackToAllFrames}");
                     _debugLog.AppendLine($"  FFmpeg Threads:                   {(_configuration.BlackFrameFfmpegThreads > 0 ? _configuration.BlackFrameFfmpegThreads.ToString() : "Auto")}");
+                    _debugLog.AppendLine($"  Hardware Acceleration Type:       {Utilities.FFmpegHelper.GetSharedHardwareDecode(_configuration).Type} (shared setting)");
                     _debugLog.AppendLine();
                 }
 
@@ -306,10 +346,23 @@ namespace EmbyCredits.Services
                 _debugLog.AppendLine("-".PadRight(80, '-'));
                 _debugLog.AppendLine($"  CPU Usage Limit (%):              {_configuration.CpuUsageLimit}");
                 _debugLog.AppendLine($"  CPU Throttle Delay (ms):          {_configuration.CpuThrottleDelayMs}");
+                _debugLog.AppendLine($"  FFmpeg Operation Timeout (min):   {(_configuration.FfmpegOperationTimeoutMinutes < 0 ? "Disabled" : _configuration.FfmpegOperationTimeoutMinutes > 0 ? _configuration.FfmpegOperationTimeoutMinutes.ToString("F1") : "Automatic")}");
                 _debugLog.AppendLine($"  Delay Between Episodes (ms):      {_configuration.DelayBetweenEpisodesMs}");
                 _debugLog.AppendLine($"  Lower Thread Priority:            {_configuration.LowerThreadPriority}");
                 _debugLog.AppendLine($"  Lower Process Priority:           {_configuration.LowerProcessPriority}");
                 _debugLog.AppendLine($"  Prevent Concurrent Plugin Proc:   {_configuration.PreventConcurrentPluginProcessing}");
+                _debugLog.AppendLine($"  Pause During Playback:            {_configuration.PauseDetectionDuringPlayback}");
+                _debugLog.AppendLine();
+
+                _debugLog.AppendLine("POST-CREDITS SCENES");
+                _debugLog.AppendLine("-".PadRight(80, '-'));
+                _debugLog.AppendLine($"  Detect Post-Credits Scenes:       {_configuration.EnablePostCreditsSceneDetection}");
+                if (_configuration.EnablePostCreditsSceneDetection)
+                {
+                    _debugLog.AppendLine($"    Action:                         {_configuration.PostCreditsSceneAction}");
+                    _debugLog.AppendLine($"    Minimum Scene Length (s):       {_configuration.PostCreditsMinSceneSeconds}");
+                    _debugLog.AppendLine($"    Hardware Decoding:              {Utilities.FFmpegHelper.GetSharedHardwareDecode(_configuration).Type} (shared setting)");
+                }
                 _debugLog.AppendLine();
 
                 _debugLog.AppendLine("THUMBNAIL SETTINGS");
@@ -333,8 +386,14 @@ namespace EmbyCredits.Services
         public void LogInfo(string message)
         {
             _logger.Info(message);
-            if (_isDebugMode && _debugLog != null)
+            if (!_isDebugMode)
+                return;
+
+            lock (_sync)
             {
+                if (_debugLog == null)
+                    return;
+
                 TruncateIfNeeded();
                 var logLine = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [INFO] {message}";
                 _debugLog.AppendLine(logLine);
@@ -346,8 +405,14 @@ namespace EmbyCredits.Services
         {
             if (_configuration?.EnableDetailedLogging == true)
                 _logger.Debug(message);
-            if (_isDebugMode && _debugLog != null)
+            if (!_isDebugMode)
+                return;
+
+            lock (_sync)
             {
+                if (_debugLog == null)
+                    return;
+
                 TruncateIfNeeded();
                 var logLine = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [DEBUG] {message}";
                 _debugLog.AppendLine(logLine);
@@ -358,8 +423,14 @@ namespace EmbyCredits.Services
         public void LogWarn(string message)
         {
             _logger.Warn(message);
-            if (_isDebugMode && _debugLog != null)
+            if (!_isDebugMode)
+                return;
+
+            lock (_sync)
             {
+                if (_debugLog == null)
+                    return;
+
                 TruncateIfNeeded();
                 var logLine = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [WARN] {message}";
                 _debugLog.AppendLine(logLine);
@@ -374,8 +445,14 @@ namespace EmbyCredits.Services
             else
                 _logger.Error(message);
 
-            if (_isDebugMode && _debugLog != null)
+            if (!_isDebugMode)
+                return;
+
+            lock (_sync)
             {
+                if (_debugLog == null)
+                    return;
+
                 TruncateIfNeeded();
                 var logLine = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [ERROR] {message}";
                 _debugLog.AppendLine(logLine);
@@ -394,8 +471,14 @@ namespace EmbyCredits.Services
 
         public void LogToDebug(string level, string message)
         {
-            if (_isDebugMode && _debugLog != null)
+            if (!_isDebugMode)
+                return;
+
+            lock (_sync)
             {
+                if (_debugLog == null)
+                    return;
+
                 TruncateIfNeeded();
                 var logLine = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [{level}] {message}";
                 _debugLog.AppendLine(logLine);
@@ -405,12 +488,36 @@ namespace EmbyCredits.Services
 
         public string GetDebugLog()
         {
-            var log = _debugLog?.ToString() ?? "No debug log available";
-            Cleanup();
-            return log;
+            lock (_sync)
+            {
+                var log = _debugLog?.ToString() ?? "No debug log available";
+                CleanupLocked();
+                return log;
+            }
         }
 
         public void Cleanup()
+        {
+            lock (_sync)
+            {
+                CleanupLocked();
+            }
+        }
+
+        private void CleanupLocked()
+        {
+            CloseLogFileWriter();
+
+            if (_debugLog != null)
+            {
+                _debugLog.Clear();
+                _debugLog = null;
+            }
+            _isDebugMode = false;
+            _currentLogFilePath = null;
+        }
+
+        private void CloseLogFileWriter()
         {
             if (_logFileWriter != null)
             {
@@ -431,30 +538,28 @@ namespace EmbyCredits.Services
                 catch (Exception ex)
                 {
                     _logger.Error($"Error closing debug log file: {ex.Message}");
+                    _logFileWriter = null;
                 }
             }
-            
-            if (_debugLog != null)
-            {
-                _debugLog.Clear();
-                _debugLog = null;
-            }
-            _isDebugMode = false;
-            _currentLogFilePath = null;
         }
 
         public void ScheduleDebugLogCleanup()
         {
-            _cleanupCts?.Cancel();
-            _cleanupCts?.Dispose();
-            _cleanupCts = new System.Threading.CancellationTokenSource();
+            System.Threading.CancellationToken token;
+            lock (_sync)
+            {
+                _cleanupCts?.Cancel();
+                _cleanupCts?.Dispose();
+                _cleanupCts = new System.Threading.CancellationTokenSource();
+                token = _cleanupCts.Token;
+            }
             
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    await Task.Delay(TimeSpan.FromMinutes(5), _cleanupCts.Token).ConfigureAwait(false);
-                    if (_isDebugMode && !_cleanupCts.Token.IsCancellationRequested)
+                    await Task.Delay(TimeSpan.FromMinutes(5), token).ConfigureAwait(false);
+                    if (_isDebugMode && !token.IsCancellationRequested)
                     {
                         _logger.Info("Debug log auto-cleanup: Debug log was not downloaded within 5 minutes, clearing from memory");
                         Cleanup();
@@ -467,7 +572,7 @@ namespace EmbyCredits.Services
                 {
                     _logger.Error($"Error in debug log cleanup: {ex.Message}");
                 }
-            }, _cleanupCts.Token);
+            }, token);
         }
 
         private void TruncateIfNeeded()
@@ -495,22 +600,14 @@ namespace EmbyCredits.Services
 
             if (disposing)
             {
-                _cleanupCts?.Cancel();
-                _cleanupCts?.Dispose();
-                _cleanupCts = null;
-                
-                if (_logFileWriter != null)
+                lock (_sync)
                 {
-                    try
-                    {
-                        _logFileWriter.Flush();
-                        _logFileWriter.Dispose();
-                        _logFileWriter = null;
-                    }
-                    catch { }
+                    _cleanupCts?.Cancel();
+                    _cleanupCts?.Dispose();
+                    _cleanupCts = null;
+
+                    CleanupLocked();
                 }
-                
-                Cleanup();
             }
 
             _disposed = true;

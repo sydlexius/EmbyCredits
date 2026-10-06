@@ -132,8 +132,8 @@ namespace EmbyCredits.Services
                 var assemblies = AppDomain.CurrentDomain.GetAssemblies();
                 
                 var introSkipperAssembly = assemblies.FirstOrDefault(a => 
-                    a.GetName().Name?.Contains("IntroSkipper", StringComparison.OrdinalIgnoreCase) == true ||
-                    a.GetName().Name?.Contains("Intro.Skipper", StringComparison.OrdinalIgnoreCase) == true);
+                    a.GetName().Name?.IndexOf("IntroSkipper", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    a.GetName().Name?.IndexOf("Intro.Skipper", StringComparison.OrdinalIgnoreCase) >= 0);
 
                 if (introSkipperAssembly == null)
                 {
@@ -147,7 +147,7 @@ namespace EmbyCredits.Services
                 _introSkipperInstalled = true;
 
                 var pluginType = introSkipperAssembly.GetTypes()
-                    .FirstOrDefault(t => t.Name.Contains("Plugin", StringComparison.OrdinalIgnoreCase));
+                    .FirstOrDefault(t => t.Name.IndexOf("Plugin", StringComparison.OrdinalIgnoreCase) >= 0);
 
                 if (pluginType != null)
                 {

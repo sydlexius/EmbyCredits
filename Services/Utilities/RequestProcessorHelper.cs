@@ -22,17 +22,17 @@ namespace EmbyCredits.Services.Utilities
 
                 if (!string.IsNullOrEmpty(episodeId))
                 {
-                    return ProcessSingleEpisode(libraryManager, episodeId, processEpisode, logger);
+                    return ProcessSingleEpisode(libraryManager, episodeId!, processEpisode, logger);
                 }
 
                 if (!string.IsNullOrEmpty(seriesId))
                 {
-                    return ProcessSeries(libraryManager, seriesId, processSeries, logger);
+                    return ProcessSeries(libraryManager, seriesId!, processSeries, logger);
                 }
 
                 if (!string.IsNullOrEmpty(libraryId))
                 {
-                    return ProcessLibrary(libraryManager, libraryId, processSeries, logger);
+                    return ProcessLibrary(libraryManager, libraryId!, processSeries, logger);
                 }
 
                 return new ProcessResult

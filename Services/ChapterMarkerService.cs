@@ -39,33 +39,50 @@ namespace EmbyCredits.Services
         private static readonly System.Reflection.PropertyInfo? _markerTypeProp =
             typeof(ChapterInfo).GetProperty("MarkerType");
 
+        public const string PostCreditsChapterName = "Post Credits";
+
+        public static bool IsPostCreditsChapter(ChapterInfo chapter)
+        {
+            return chapter?.Name != null &&
+                   string.Equals(chapter.Name.Trim(), PostCreditsChapterName, StringComparison.OrdinalIgnoreCase);
+        }
+
         public ChapterMarkerService(ILogger logger, IItemRepository itemRepository)
         {
             _logger = logger;
             _itemRepository = itemRepository;
         }
 
-        public void SaveCreditsMarker(Episode episode, double creditsStartSeconds)
+        public bool SaveCreditsMarker(Episode episode, double creditsStartSeconds)
         {
+            return TrySaveCreditsMarker(episode, creditsStartSeconds, out _);
+        }
+
+        public bool TrySaveCreditsMarker(Episode episode, double creditsStartSeconds, out string failureReason)
+        {
+            failureReason = string.Empty;
             try
             {
                 if (!episode.RunTimeTicks.HasValue || episode.RunTimeTicks.Value <= 0)
                 {
                     _logger.Error($"Cannot save credits marker for {episode.Name} - no valid runtime information");
-                    throw new InvalidOperationException("Episode has no valid runtime information");
+                    failureReason = "Cannot save credits marker: episode has no valid runtime information";
+                    return false;
                 }
 
                 var durationSeconds = episode.RunTimeTicks.Value / (double)TimeSpan.TicksPerSecond;
                 if (creditsStartSeconds < 0)
                 {
                     _logger.Error($"Cannot save credits marker for {episode.Name} - negative timestamp: {creditsStartSeconds}s");
-                    throw new ArgumentOutOfRangeException(nameof(creditsStartSeconds), "Timestamp cannot be negative");
+                    failureReason = $"Cannot save credits marker: negative timestamp {creditsStartSeconds:F1}s";
+                    return false;
                 }
 
                 if (creditsStartSeconds >= durationSeconds)
                 {
                     _logger.Error($"Cannot save credits marker for {episode.Name} - timestamp ({creditsStartSeconds:F1}s) exceeds video duration ({durationSeconds:F1}s)");
-                    throw new ArgumentOutOfRangeException(nameof(creditsStartSeconds), $"Timestamp {creditsStartSeconds:F1}s exceeds video duration {durationSeconds:F1}s");
+                    failureReason = $"Cannot save credits marker: timestamp {creditsStartSeconds:F1}s exceeds video duration {durationSeconds:F1}s";
+                    return false;
                 }
 
                 var safeMax = durationSeconds - 30.0;
@@ -88,7 +105,8 @@ namespace EmbyCredits.Services
                 {
                     var introSeconds = introAfterCredits.StartPositionTicks / (double)TimeSpan.TicksPerSecond;
                     _logger.Warn($"Skipping credits marker for {episode.Name}: detected credits at {FormatTime(creditsStartSeconds)} precede {GetMarkerType(introAfterCredits)} marker at {FormatTime(introSeconds)}");
-                    return;
+                    failureReason = $"Detected credits at {FormatTime(creditsStartSeconds)} precede the {GetMarkerType(introAfterCredits)} marker at {FormatTime(introSeconds)}";
+                    return false;
                 }
 
                 var existingCreditsMarkers = chapters.Where(c =>
@@ -97,7 +115,13 @@ namespace EmbyCredits.Services
                     if (markerType == "CreditsStart" || markerType == "Credits")
                         return true;
 
-                    if (c.Name != null)
+                    if (IsPostCreditsChapter(c))
+                        return false;
+
+                    var duration = episode.RunTimeTicks ?? 0;
+                    var isInLaterPart = duration > 0 && (double)c.StartPositionTicks / duration >= 0.40;
+
+                    if (c.Name != null && isInLaterPart)
                     {
                         var nameLower = c.Name.ToLowerInvariant();
                         if (nameLower.Contains("credit") || 
@@ -107,11 +131,10 @@ namespace EmbyCredits.Services
                             return true;
                     }
 
-                    var duration = episode.RunTimeTicks ?? 0;
                     if (duration > 0)
                     {
                         var positionRatio = (double)c.StartPositionTicks / duration;
-                        if (positionRatio >= 0.80 && (string.IsNullOrEmpty(c.Name) || c.Name.Length < 3))
+                        if (positionRatio >= 0.80 && (string.IsNullOrEmpty(c.Name) || c.Name!.Length < 3))
                             return true;
                     }
 
@@ -133,20 +156,13 @@ namespace EmbyCredits.Services
                     StartPositionTicks = (long)(creditsStartSeconds * TimeSpan.TicksPerSecond)
                 };
 
-                if (IsAutoSkipExcluded(episode))
-                {
-                    _logger.Info($"Series is excluded from auto-skip; saving marker for {episode.Name} without CreditsStart MarkerType");
-                }
-                else
-                {
-                    var markerTypeSet = SetMarkerType(creditsMarker, MarkerType.CreditsStart);
-                    _logger.Info($"MarkerType.CreditsStart set: {markerTypeSet}");
+                var markerTypeSet = SetMarkerType(creditsMarker, MarkerType.CreditsStart);
+                _logger.Info($"MarkerType.CreditsStart set: {markerTypeSet}");
 
-                    if (markerTypeSet)
-                    {
-                        var verifyType = GetMarkerType(creditsMarker);
-                        _logger.Info($"Verified MarkerType value: {verifyType}");
-                    }
+                if (markerTypeSet)
+                {
+                    var verifyType = GetMarkerType(creditsMarker);
+                    _logger.Info($"Verified MarkerType value: {verifyType}");
                 }
 
                 int insertIndex = chapters.FindIndex(c => c.StartPositionTicks > creditsMarker.StartPositionTicks);
@@ -164,16 +180,104 @@ namespace EmbyCredits.Services
                 {
                     _itemRepository.SaveChapters(episode.InternalId, chapters);
                     _logger.Info($"Saved chapter markers for {episode.Name}");
+                    return true;
                 }
                 catch (Exception saveEx)
                 {
                     _logger.ErrorException($"Failed to save chapters to repository for {episode.Name}", saveEx);
-                    throw;
+                    failureReason = $"Failed to save credits marker: {saveEx.Message}";
+                    return false;
                 }
             }
             catch (Exception ex)
             {
                 _logger.ErrorException($"Error saving credits chapter marker for {episode.Name}", ex);
+                failureReason = $"Failed to save credits marker: {ex.Message}";
+                return false;
+            }
+        }
+
+        public bool TryRemoveCreditsMarkers(Episode episode, out string failureReason)
+        {
+            failureReason = string.Empty;
+            try
+            {
+                var chapters = _itemRepository.GetChapters(episode)?.ToList() ?? new List<ChapterInfo>();
+                var removed = chapters.RemoveAll(c => GetMarkerType(c) == "CreditsStart");
+                if (removed == 0)
+                    return true;
+
+                _itemRepository.SaveChapters(episode.InternalId, chapters);
+                _logger.Info($"Removed {removed} credits marker(s) from {episode.Name}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.ErrorException($"Error removing credits marker from {episode.Name}", ex);
+                failureReason = $"Failed to remove credits marker: {ex.Message}";
+                return false;
+            }
+        }
+
+        public bool TrySetPostCreditsChapter(Episode episode, double? startSeconds, out string failureReason)
+        {
+            failureReason = string.Empty;
+            try
+            {
+                var chapters = _itemRepository.GetChapters(episode)?.ToList() ?? new List<ChapterInfo>();
+                var existing = chapters.Where(IsPostCreditsChapter).ToList();
+
+                if (!startSeconds.HasValue)
+                {
+                    if (existing.Count == 0)
+                        return true;
+
+                    foreach (var chapter in existing)
+                        chapters.Remove(chapter);
+
+                    _itemRepository.SaveChapters(episode.InternalId, chapters);
+                    _logger.Info($"Removed '{PostCreditsChapterName}' chapter from {episode.Name} - no post-credits scene found");
+                    return true;
+                }
+
+                var durationSeconds = episode.RunTimeTicks.HasValue && episode.RunTimeTicks.Value > 0
+                    ? episode.RunTimeTicks.Value / (double)TimeSpan.TicksPerSecond
+                    : 0;
+                if (startSeconds.Value <= 0 || (durationSeconds > 0 && startSeconds.Value >= durationSeconds))
+                {
+                    failureReason = $"'{PostCreditsChapterName}' chapter time {FormatTime(startSeconds.Value)} is outside the episode";
+                    return false;
+                }
+
+                var startTicks = (long)(startSeconds.Value * TimeSpan.TicksPerSecond);
+                if (existing.Count == 1 && Math.Abs(existing[0].StartPositionTicks - startTicks) < TimeSpan.TicksPerSecond)
+                    return true;
+
+                foreach (var chapter in existing)
+                    chapters.Remove(chapter);
+
+                var postCreditsChapter = new ChapterInfo
+                {
+                    Name = PostCreditsChapterName,
+                    StartPositionTicks = startTicks
+                };
+                SetMarkerType(postCreditsChapter, MarkerType.Chapter);
+
+                var insertIndex = chapters.FindIndex(c => c.StartPositionTicks > startTicks);
+                if (insertIndex == -1)
+                    chapters.Add(postCreditsChapter);
+                else
+                    chapters.Insert(insertIndex, postCreditsChapter);
+
+                _itemRepository.SaveChapters(episode.InternalId, chapters);
+                _logger.Info($"Added '{PostCreditsChapterName}' chapter at {FormatTime(startSeconds.Value)} for {episode.Name}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.ErrorException($"Error saving '{PostCreditsChapterName}' chapter for {episode.Name}", ex);
+                failureReason = $"Failed to save '{PostCreditsChapterName}' chapter: {ex.Message}";
+                return false;
             }
         }
 
@@ -238,7 +342,7 @@ namespace EmbyCredits.Services
 
                 var creditsChapter = chapters.FirstOrDefault(c =>
                 {
-                    if (string.IsNullOrWhiteSpace(c.Name))
+                    if (string.IsNullOrWhiteSpace(c.Name) || IsPostCreditsChapter(c))
                         return false;
 
                     var name = c.Name.Trim().ToLowerInvariant();
@@ -273,8 +377,7 @@ namespace EmbyCredits.Services
 
                 var creditsStartSeconds = creditsChapter.StartPositionTicks / (double)TimeSpan.TicksPerSecond;
                 _logger.Info($"Importing embedded credits chapter '{creditsChapter.Name}' at {FormatTime(creditsStartSeconds)} for {episode.Name}");
-                SaveCreditsMarker(episode, creditsStartSeconds);
-                return true;
+                return SaveCreditsMarker(episode, creditsStartSeconds);
             }
             catch (Exception ex)
             {

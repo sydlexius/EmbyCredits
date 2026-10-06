@@ -15,7 +15,6 @@ namespace EmbyCredits.Services.DetectionMethods
     {
         private static readonly DetectionTimestampCache _cache = new DetectionTimestampCache();
         
-        // AsyncLocal-backed so concurrently-processed episodes sharing this same detection method instance don't overwrite each other's per-run confidence
         private static readonly AsyncLocal<double?> _calculatedConfidenceState = new AsyncLocal<double?>();
         private double _calculatedConfidence
         {
@@ -230,7 +229,7 @@ namespace EmbyCredits.Services.DetectionMethods
             if (frames.Count == 0)
             {
                 LogDebug("No keyframes found in analysis range");
-                return 0;
+                return await FallbackToAllFramesIfNeeded(videoPath, duration, startTime, endTime, minimumCreditsDuration, maxCreditsDuration, cancellationToken, forceAllFrames);
             }
 
             var (minimum, sceneChange) = NormalizeThresholds(frames, minimumPercentage);
@@ -241,7 +240,7 @@ namespace EmbyCredits.Services.DetectionMethods
             if (scenes.Count == 0)
             {
                 LogDebug("No credit scenes detected after density gating");
-                return 0;
+                return await FallbackToAllFramesIfNeeded(videoPath, duration, startTime, endTime, minimumCreditsDuration, maxCreditsDuration, cancellationToken, forceAllFrames);
             }
 
             LogDebug($"Detected {scenes.Count} candidate credit scene(s)");
@@ -273,7 +272,24 @@ namespace EmbyCredits.Services.DetectionMethods
                 return refinedAbsolute;
             }
 
-            return 0;
+            return await FallbackToAllFramesIfNeeded(videoPath, duration, startTime, endTime, minimumCreditsDuration, maxCreditsDuration, cancellationToken, forceAllFrames);
+        }
+
+        private Task<double> FallbackToAllFramesIfNeeded(
+            string videoPath,
+            double duration,
+            double startTime,
+            double endTime,
+            double minimumCreditsDuration,
+            double maxCreditsDuration,
+            CancellationToken cancellationToken,
+            bool alreadyScannedAllFrames)
+        {
+            if (alreadyScannedAllFrames || Configuration.BlackFrameScanAllFrames || !Configuration.BlackFrameAutoFallbackToAllFrames)
+                return Task.FromResult(0.0);
+
+            LogInfo("Keyframe-only scan found no valid credit scene - retrying with a full-frame scan (Auto-Fallback to All Frames)");
+            return RunDetectionPipeline(videoPath, duration, startTime, endTime, minimumCreditsDuration, maxCreditsDuration, cancellationToken, forceAllFrames: true);
         }
 
         private static (int Minimum, int SceneChange) NormalizeThresholds(List<BlackFrameData> frames, int minimumPercentage)
@@ -310,28 +326,31 @@ namespace EmbyCredits.Services.DetectionMethods
 
             if (!forceAllFrames && !Configuration.BlackFrameScanAllFrames)
             {
-                startInfo.ArgumentList.Add("-skip_frame");
-                startInfo.ArgumentList.Add("nokey");
+                startInfo.ArgumentList().Add("-skip_frame");
+                startInfo.ArgumentList().Add("nokey");
             }
-            startInfo.ArgumentList.Add("-ss");
-            startInfo.ArgumentList.Add(startTime.ToString(CultureInfo.InvariantCulture));
+            startInfo.ArgumentList().Add("-ss");
+            startInfo.ArgumentList().Add(startTime.ToString(CultureInfo.InvariantCulture));
             if (Configuration.BlackFrameFfmpegThreads > 0)
             {
-                startInfo.ArgumentList.Add("-threads");
-                startInfo.ArgumentList.Add(Configuration.BlackFrameFfmpegThreads.ToString(CultureInfo.InvariantCulture));
+                startInfo.ArgumentList().Add("-threads");
+                startInfo.ArgumentList().Add(Configuration.BlackFrameFfmpegThreads.ToString(CultureInfo.InvariantCulture));
             }
-            startInfo.ArgumentList.Add("-i");
-            startInfo.ArgumentList.Add(FFmpegHelper.ResolveInputPath(videoPath));
-            startInfo.ArgumentList.Add("-t");
-            startInfo.ArgumentList.Add(analysisDuration.ToString(CultureInfo.InvariantCulture));
-            startInfo.ArgumentList.Add("-an");
-            startInfo.ArgumentList.Add("-dn");
-            startInfo.ArgumentList.Add("-sn");
-            startInfo.ArgumentList.Add("-vf");
-            startInfo.ArgumentList.Add($"blackframe=amount=0:threshold={threshold}");
-            startInfo.ArgumentList.Add("-f");
-            startInfo.ArgumentList.Add("null");
-            startInfo.ArgumentList.Add("-");
+            AddHardwareAccelArgs(startInfo);
+            var resolvedKeyframePath = FFmpegHelper.ResolveInputPath(videoPath);
+            FFmpegHelper.AddStrmNetworkResilienceArgs(startInfo, videoPath, resolvedKeyframePath, Configuration);
+            startInfo.ArgumentList().Add("-i");
+            startInfo.ArgumentList().Add(resolvedKeyframePath);
+            startInfo.ArgumentList().Add("-t");
+            startInfo.ArgumentList().Add(analysisDuration.ToString(CultureInfo.InvariantCulture));
+            startInfo.ArgumentList().Add("-an");
+            startInfo.ArgumentList().Add("-dn");
+            startInfo.ArgumentList().Add("-sn");
+            startInfo.ArgumentList().Add("-vf");
+            startInfo.ArgumentList().Add($"blackframe=amount=0:threshold={threshold}");
+            startInfo.ArgumentList().Add("-f");
+            startInfo.ArgumentList().Add("null");
+            startInfo.ArgumentList().Add("-");
 
             return await RunFfmpegAndParse(startInfo, cancellationToken, $"KeyframeScan: {System.IO.Path.GetFileName(videoPath)}");
         }
@@ -355,27 +374,36 @@ namespace EmbyCredits.Services.DetectionMethods
                 CreateNoWindow = true
             };
 
-            startInfo.ArgumentList.Add("-ss");
-            startInfo.ArgumentList.Add(startTime.ToString(CultureInfo.InvariantCulture));
+            startInfo.ArgumentList().Add("-ss");
+            startInfo.ArgumentList().Add(startTime.ToString(CultureInfo.InvariantCulture));
             if (Configuration.BlackFrameFfmpegThreads > 0)
             {
-                startInfo.ArgumentList.Add("-threads");
-                startInfo.ArgumentList.Add(Configuration.BlackFrameFfmpegThreads.ToString(CultureInfo.InvariantCulture));
+                startInfo.ArgumentList().Add("-threads");
+                startInfo.ArgumentList().Add(Configuration.BlackFrameFfmpegThreads.ToString(CultureInfo.InvariantCulture));
             }
-            startInfo.ArgumentList.Add("-i");
-            startInfo.ArgumentList.Add(FFmpegHelper.ResolveInputPath(videoPath));
-            startInfo.ArgumentList.Add("-t");
-            startInfo.ArgumentList.Add(analysisDuration.ToString(CultureInfo.InvariantCulture));
-            startInfo.ArgumentList.Add("-an");
-            startInfo.ArgumentList.Add("-dn");
-            startInfo.ArgumentList.Add("-sn");
-            startInfo.ArgumentList.Add("-vf");
-            startInfo.ArgumentList.Add($"blackframe=amount=50:threshold={threshold}");
-            startInfo.ArgumentList.Add("-f");
-            startInfo.ArgumentList.Add("null");
-            startInfo.ArgumentList.Add("-");
+            AddHardwareAccelArgs(startInfo);
+            var resolvedFullFramePath = FFmpegHelper.ResolveInputPath(videoPath);
+            FFmpegHelper.AddStrmNetworkResilienceArgs(startInfo, videoPath, resolvedFullFramePath, Configuration);
+            startInfo.ArgumentList().Add("-i");
+            startInfo.ArgumentList().Add(resolvedFullFramePath);
+            startInfo.ArgumentList().Add("-t");
+            startInfo.ArgumentList().Add(analysisDuration.ToString(CultureInfo.InvariantCulture));
+            startInfo.ArgumentList().Add("-an");
+            startInfo.ArgumentList().Add("-dn");
+            startInfo.ArgumentList().Add("-sn");
+            startInfo.ArgumentList().Add("-vf");
+            startInfo.ArgumentList().Add($"blackframe=amount=50:threshold={threshold}");
+            startInfo.ArgumentList().Add("-f");
+            startInfo.ArgumentList().Add("null");
+            startInfo.ArgumentList().Add("-");
 
             return await RunFfmpegAndParse(startInfo, cancellationToken, $"BoundaryProbe: {System.IO.Path.GetFileName(videoPath)}");
+        }
+
+        private void AddHardwareAccelArgs(ProcessStartInfo startInfo)
+        {
+            var (hardwareType, hardwareDevice) = FFmpegHelper.GetSharedHardwareDecode(Configuration);
+            FFmpegHelper.AddHardwareDecodeArgs(startInfo, hardwareType, hardwareDevice, Logger);
         }
 
         private async Task<List<BlackFrameData>> RunFfmpegAndParse(ProcessStartInfo startInfo, CancellationToken cancellationToken, string description)
@@ -399,6 +427,7 @@ namespace EmbyCredits.Services.DetectionMethods
                 try
                 {
                     process.ErrorDataReceived += errorHandler;
+                    startInfo.ApplyArgumentList();
                     process.Start();
                     FFmpegHelper.RegisterProcess(process, description);
 
@@ -406,7 +435,13 @@ namespace EmbyCredits.Services.DetectionMethods
                         CpuThrottler.SetProcessPriority(process, Configuration);
 
                     process.BeginErrorReadLine();
-                    await process.WaitForExitAsync(cancellationToken);
+
+                    var resolvedTimeout = FFmpegHelper.ResolveOperationTimeout(Configuration, defaultMinutes: null);
+                    using var timeoutCts = resolvedTimeout.HasValue ? new CancellationTokenSource(resolvedTimeout.Value) : null;
+                    using var linkedCts = timeoutCts != null ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token) : null;
+                    var effectiveToken = linkedCts?.Token ?? cancellationToken;
+
+                    await process.WaitForExitAsync(effectiveToken);
 
                     if (Configuration.ChromaprintDelayBetweenOperationsMs > 0)
                         await Task.Delay(Configuration.ChromaprintDelayBetweenOperationsMs, cancellationToken);

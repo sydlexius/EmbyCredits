@@ -17,5 +17,7 @@ namespace EmbyCredits
         public bool BlackFrameRefineCreditsBoundary { get; set; } = true;
         public int BlackFrameParallelSessions { get; set; } = 1;
         public int BlackFrameFfmpegThreads { get; set; } = 2;
+        public string BlackFrameHardwareAccelerationType { get; set; } = "none";
+        public string BlackFrameHardwareDevice { get; set; } = "";
     }
 }

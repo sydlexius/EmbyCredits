@@ -6,8 +6,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
-using System.Text.Json;
-using System.Text.Json.Serialization;
+using EmbyCredits.Services.Utilities;
 
 namespace EmbyCredits.Services
 {
@@ -33,19 +32,11 @@ namespace EmbyCredits.Services
         private ConcurrentDictionary<string, TracerEntry> _pending =
             new ConcurrentDictionary<string, TracerEntry>(StringComparer.OrdinalIgnoreCase);
 
-        // Recently auto-detected episodes (newest first, capped at MaxDetectedEntries)
         private ConcurrentDictionary<string, TracerEntry> _detected =
             new ConcurrentDictionary<string, TracerEntry>(StringComparer.OrdinalIgnoreCase);
 
-        // Episodes where detection ran but failed (newest first, capped at MaxFailedEntries)
         private ConcurrentDictionary<string, TracerEntry> _failed =
             new ConcurrentDictionary<string, TracerEntry>(StringComparer.OrdinalIgnoreCase);
-
-        private static readonly JsonSerializerOptions _jsonOptions = new JsonSerializerOptions
-        {
-            WriteIndented = true,
-            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
-        };
 
         public TracerService(ILogger logger, string dataFolderPath)
         {
@@ -220,7 +211,7 @@ namespace EmbyCredits.Services
                 if (File.Exists(_stateFilePath))
                 {
                     var json = File.ReadAllText(_stateFilePath);
-                    var list = JsonSerializer.Deserialize<List<TracerEntry>>(json);
+                    var list = SimpleJson.Deserialize<List<TracerEntry>>(json);
                     if (list != null)
                     {
                         var dict = new ConcurrentDictionary<string, TracerEntry>(StringComparer.OrdinalIgnoreCase);
@@ -240,7 +231,7 @@ namespace EmbyCredits.Services
                 if (File.Exists(_detectedFilePath))
                 {
                     var json = File.ReadAllText(_detectedFilePath);
-                    var list = JsonSerializer.Deserialize<List<TracerEntry>>(json);
+                    var list = SimpleJson.Deserialize<List<TracerEntry>>(json);
                     if (list != null)
                     {
                         var dict = new ConcurrentDictionary<string, TracerEntry>(StringComparer.OrdinalIgnoreCase);
@@ -260,7 +251,7 @@ namespace EmbyCredits.Services
                 if (File.Exists(_failedFilePath))
                 {
                     var json = File.ReadAllText(_failedFilePath);
-                    var list = JsonSerializer.Deserialize<List<TracerEntry>>(json);
+                    var list = SimpleJson.Deserialize<List<TracerEntry>>(json);
                     if (list != null)
                     {
                         var dict = new ConcurrentDictionary<string, TracerEntry>(StringComparer.OrdinalIgnoreCase);
@@ -287,11 +278,11 @@ namespace EmbyCredits.Services
                         Directory.CreateDirectory(dir);
 
                     File.WriteAllText(_stateFilePath,
-                        JsonSerializer.Serialize(_pending.Values.ToList(), _jsonOptions));
+                        SimpleJson.Serialize(_pending.Values.ToList(), indented: true));
                     File.WriteAllText(_detectedFilePath,
-                        JsonSerializer.Serialize(_detected.Values.ToList(), _jsonOptions));
+                        SimpleJson.Serialize(_detected.Values.ToList(), indented: true));
                     File.WriteAllText(_failedFilePath,
-                        JsonSerializer.Serialize(_failed.Values.ToList(), _jsonOptions));
+                        SimpleJson.Serialize(_failed.Values.ToList(), indented: true));
                 }
                 catch (Exception ex)
                 {

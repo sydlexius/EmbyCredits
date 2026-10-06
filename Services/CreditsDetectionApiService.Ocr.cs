@@ -1,13 +1,14 @@
 using System;
+using System.Threading;
 using System.Threading.Tasks;
 using EmbyCredits.Api;
+using EmbyCredits.Services.Http;
 using EmbyCredits.Services.Utilities;
 
 namespace EmbyCredits.Services
 {
     public partial class CreditsDetectionApiService
     {
-        // Status values: "Ready", "Unreachable" (host/port not answering - may still be starting), "BadResponse" (reached but unexpected data), "NotConfigured", "Error"
         private const int OcrTestMaxAttempts = 3;
         private static readonly TimeSpan OcrTestRetryDelay = TimeSpan.FromSeconds(3);
 
@@ -47,7 +48,6 @@ namespace EmbyCredits.Services
 
                     lastMessage = message;
 
-                    // Only retry when the server can't be reached at all - a bad response means it's up but misbehaving
                     if (status != "Unreachable" || attempt == OcrTestMaxAttempts)
                     {
                         var finalMessage = status == "Unreachable"
@@ -74,109 +74,110 @@ namespace EmbyCredits.Services
 
         private async Task<(bool Success, string Status, string Message)> TryOcrConnectionOnce(string ocrEngine, string endpoint)
         {
-            using (var httpClient = new System.Net.Http.HttpClient())
-            {
-                httpClient.Timeout = TimeSpan.FromSeconds(15);
+            var httpClient = HttpClientPool.Instance.GetClient();
 
-                if (ocrEngine != "PaddleOCR")
+            if (ocrEngine != "PaddleOCR")
+            {
+                try
                 {
+                    using (var pingCts = new CancellationTokenSource(TimeSpan.FromSeconds(15)))
+                    using (var pingResponse = await httpClient.GetAsync(endpoint, pingCts.Token).ConfigureAwait(false))
+                    {
+                        if (!pingResponse.IsSuccessStatusCode)
+                        {
+                            return (false, "BadResponse", $"OCR server returned status: {pingResponse.StatusCode}");
+                        }
+                    }
+                }
+                catch (System.Net.Http.HttpRequestException ex)
+                {
+                    return (false, "Unreachable", ex.Message);
+                }
+                catch (OperationCanceledException)
+                {
+                    return (false, "Unreachable", "Request timed out");
+                }
+            }
+
+            try
+            {
+                var assembly = System.Reflection.Assembly.GetExecutingAssembly();
+                var resourceName = "EmbyCredits.Images.logo.jpg";
+
+                byte[] imageBytes;
+                using (var stream = assembly.GetManifestResourceStream(resourceName))
+                {
+                    if (stream == null)
+                    {
+                        return (false, "Error", "Logo not found in embedded resources.");
+                    }
+
+                    using (var memoryStream = new System.IO.MemoryStream())
+                    {
+                        stream.CopyTo(memoryStream);
+                        imageBytes = memoryStream.ToArray();
+                    }
+                }
+
+                using (var content = new System.Net.Http.MultipartFormDataContent())
+                using (var imageContent = new System.Net.Http.ByteArrayContent(imageBytes))
+                {
+                    imageContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("image/jpeg");
+
+                    string ocrEndpoint;
+                    if (ocrEngine == "PaddleOCR")
+                    {
+                        content.Add(imageContent, "file", "logo.jpg");
+                        ocrEndpoint = endpoint + "/ocr/file";
+                    }
+                    else
+                    {
+                        content.Add(imageContent, "file", "logo.jpg");
+                        var optionsContent = new System.Net.Http.StringContent("{\"languages\":[\"eng\"]}");
+                        content.Add(optionsContent, "options");
+                        ocrEndpoint = endpoint + "/tesseract";
+                    }
+
+                    System.Net.Http.HttpResponseMessage ocrResponse;
                     try
                     {
-                        using (var pingResponse = await httpClient.GetAsync(endpoint).ConfigureAwait(false))
+                        using (var postCts = new CancellationTokenSource(TimeSpan.FromSeconds(15)))
                         {
-                            if (!pingResponse.IsSuccessStatusCode)
-                            {
-                                return (false, "BadResponse", $"OCR server returned status: {pingResponse.StatusCode}");
-                            }
+                            ocrResponse = await httpClient.PostAsync(ocrEndpoint, content, postCts.Token).ConfigureAwait(false);
                         }
                     }
                     catch (System.Net.Http.HttpRequestException ex)
                     {
                         return (false, "Unreachable", ex.Message);
                     }
-                    catch (TaskCanceledException)
+                    catch (OperationCanceledException)
                     {
                         return (false, "Unreachable", "Request timed out");
                     }
-                }
 
-                try
-                {
-                    var assembly = System.Reflection.Assembly.GetExecutingAssembly();
-                    var resourceName = "EmbyCredits.Images.logo.jpg";
-
-                    byte[] imageBytes;
-                    using (var stream = assembly.GetManifestResourceStream(resourceName))
+                    using (ocrResponse)
                     {
-                        if (stream == null)
+                        if (!ocrResponse.IsSuccessStatusCode)
                         {
-                            return (false, "Error", "Logo not found in embedded resources.");
+                            var errorContent = await ocrResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
+                            return (false, "BadResponse", $"OCR processing failed with status: {ocrResponse.StatusCode}. Details: {errorContent.Substring(0, Math.Min(200, errorContent.Length))}");
                         }
 
-                        using (var memoryStream = new System.IO.MemoryStream())
-                        {
-                            stream.CopyTo(memoryStream);
-                            imageBytes = memoryStream.ToArray();
-                        }
-                    }
+                        var ocrResult = await ocrResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
+                        var engineLabel = ocrEngine == "PaddleOCR" ? "PaddleOCR" : "Tesseract";
 
-                    using (var content = new System.Net.Http.MultipartFormDataContent())
-                    using (var imageContent = new System.Net.Http.ByteArrayContent(imageBytes))
-                    {
-                        imageContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("image/jpeg");
-
-                        string ocrEndpoint;
-                        if (ocrEngine == "PaddleOCR")
+                        if (ocrResult.Contains("\"data\"") && ocrResult.Contains("\"stdout\"") && ocrResult.Length > 20)
                         {
-                            content.Add(imageContent, "file", "logo.jpg");
-                            ocrEndpoint = endpoint + "/ocr/file";
-                        }
-                        else
-                        {
-                            content.Add(imageContent, "file", "logo.jpg");
-                            var optionsContent = new System.Net.Http.StringContent("{\"languages\":[\"eng\"]}");
-                            content.Add(optionsContent, "options");
-                            ocrEndpoint = endpoint + "/tesseract";
+                            return (true, "Ready", $"✓ Connection successful! {engineLabel} server is responding correctly.");
                         }
 
-                        System.Net.Http.HttpResponseMessage ocrResponse;
-                        try
-                        {
-                            ocrResponse = await httpClient.PostAsync(ocrEndpoint, content).ConfigureAwait(false);
-                        }
-                        catch (System.Net.Http.HttpRequestException ex)
-                        {
-                            return (false, "Unreachable", ex.Message);
-                        }
-                        catch (TaskCanceledException)
-                        {
-                            return (false, "Unreachable", "Request timed out");
-                        }
-
-                        using (ocrResponse)
-                        {
-                            if (!ocrResponse.IsSuccessStatusCode)
-                            {
-                                var errorContent = await ocrResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
-                                return (false, "BadResponse", $"OCR processing failed with status: {ocrResponse.StatusCode}. Details: {errorContent.Substring(0, Math.Min(200, errorContent.Length))}");
-                            }
-
-                            var ocrResult = await ocrResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
-                            var engineLabel = ocrEngine == "PaddleOCR" ? "PaddleOCR" : "Tesseract";
-
-                            if (ocrResult.Contains("\"data\"") && ocrResult.Contains("\"stdout\"") && ocrResult.Length > 20)
-                            {
-                                return (true, "Ready", $"✓ Connection successful! {engineLabel} server is responding correctly.");
-                            }
-
-                            return (false, "BadResponse", $"{engineLabel} server responded but returned unexpected format: {ocrResult.Substring(0, Math.Min(150, ocrResult.Length))}...");
-                        }
+                        return (false, "BadResponse", $"{engineLabel} server responded but returned unexpected format: {ocrResult.Substring(0, Math.Min(150, ocrResult.Length))}...");
                     }
                 }
-                catch (Exception ocrEx)
-                {
-                    return (false, "Error", $"OCR test failed: {ocrEx.Message}");
-                }
+            }
+            catch (Exception ocrEx)
+            {
+                return (false, "Error", $"OCR test failed: {ocrEx.Message}");
             }
         }
 
@@ -198,45 +199,41 @@ namespace EmbyCredits.Services
 
                 var endpoint = request.OcrEndpoint.TrimEnd('/');
 
-                // Different container images expose different lightweight health paths (PaddleOCR uses /health, Tesseract uses /status) - try the expected one first, then fall back
                 var healthPaths = request.OcrEngine == "PaddleOCR"
                     ? new[] { "/health", "/status" }
                     : new[] { "/status", "/health" };
 
-                using (var httpClient = new System.Net.Http.HttpClient())
+                var httpClient = HttpClientPool.Instance.GetClient();
+
+                foreach (var path in healthPaths)
                 {
-                    httpClient.Timeout = TimeSpan.FromSeconds(5);
-
-                    foreach (var path in healthPaths)
+                    try
                     {
-                        try
+                        using (var statusCts = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+                        using (var response = await httpClient.GetAsync(endpoint + path, statusCts.Token).ConfigureAwait(false))
                         {
-                            using (var response = await httpClient.GetAsync(endpoint + path).ConfigureAwait(false))
+                            if (response.IsSuccessStatusCode)
                             {
-                                if (response.IsSuccessStatusCode)
-                                {
-                                    return new { Success = true, Status = "Ready", Message = "OCR engine is ready" };
-                                }
+                                return new { Success = true, Status = "Ready", Message = "OCR engine is ready" };
+                            }
 
-                                if (response.StatusCode != System.Net.HttpStatusCode.NotFound)
-                                {
-                                    return new { Success = false, Status = "BadResponse", Message = $"OCR server returned status: {response.StatusCode}" };
-                                }
-                                // 404 on this path - try the next candidate path below
+                            if (response.StatusCode != System.Net.HttpStatusCode.NotFound)
+                            {
+                                return new { Success = false, Status = "BadResponse", Message = $"OCR server returned status: {response.StatusCode}" };
                             }
                         }
-                        catch (System.Net.Http.HttpRequestException)
-                        {
-                            return new { Success = false, Status = "Unreachable", Message = "Not reachable yet - the container may still be starting or not running" };
-                        }
-                        catch (TaskCanceledException)
-                        {
-                            return new { Success = false, Status = "Unreachable", Message = "OCR server did not respond in time" };
-                        }
                     }
-
-                    return new { Success = false, Status = "BadResponse", Message = "OCR server is reachable but has no /health or /status endpoint" };
+                    catch (System.Net.Http.HttpRequestException)
+                    {
+                        return new { Success = false, Status = "Unreachable", Message = "Not reachable yet - the container may still be starting or not running" };
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        return new { Success = false, Status = "Unreachable", Message = "OCR server did not respond in time" };
+                    }
                 }
+
+                return new { Success = false, Status = "BadResponse", Message = "OCR server is reachable but has no /health or /status endpoint" };
             }
             catch (Exception ex)
             {

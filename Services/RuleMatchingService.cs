@@ -1,4 +1,4 @@
-﻿using MediaBrowser.Controller.Entities.TV;
+using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Logging;
 using System;
@@ -205,16 +205,13 @@ namespace EmbyCredits.Services
                 effectiveConfig.OcrEngine = rule.OcrEngine.Value;
 
             if (rule.OcrSearchStartValue.HasValue)
+            {
                 effectiveConfig.OcrSearchStartValue = rule.OcrSearchStartValue.Value;
-
-            if (rule.OcrMinutesFromEnd.HasValue)
-                effectiveConfig.OcrMinutesFromEnd = rule.OcrMinutesFromEnd.Value;
+                effectiveConfig.OcrSearchStartUnit = "minutes";
+            }
 
             if (rule.OcrFrameRate.HasValue)
                 effectiveConfig.OcrFrameRate = rule.OcrFrameRate.Value;
-
-            if (rule.OcrMinimumMatches.HasValue)
-                effectiveConfig.OcrMinimumMatches = rule.OcrMinimumMatches.Value;
 
             if (rule.OcrMaxFramesToProcess.HasValue)
                 effectiveConfig.OcrMaxFramesToProcess = rule.OcrMaxFramesToProcess.Value;
@@ -222,20 +219,11 @@ namespace EmbyCredits.Services
             if (rule.OcrMaxAnalysisDuration.HasValue)
                 effectiveConfig.OcrMaxAnalysisDuration = rule.OcrMaxAnalysisDuration.Value;
 
-            if (rule.OcrStopSecondsFromEnd.HasValue)
-                effectiveConfig.OcrStopSecondsFromEnd = rule.OcrStopSecondsFromEnd.Value;
-
             if (!string.IsNullOrEmpty(rule.OcrDetectionKeywords))
-                effectiveConfig.OcrDetectionKeywords = rule.OcrDetectionKeywords;
-
-            if (rule.OcrEpisodeComparisonTolerance.HasValue)
-                effectiveConfig.OcrEpisodeComparisonTolerance = rule.OcrEpisodeComparisonTolerance.Value;
+                effectiveConfig.OcrDetectionKeywords = rule.OcrDetectionKeywords!;
 
             if (rule.OcrEnableEpisodeComparison.HasValue)
                 effectiveConfig.OcrEnableEpisodeComparison = rule.OcrEnableEpisodeComparison.Value;
-
-            if (rule.OcrEpisodeComparisonMinimumEpisodes.HasValue)
-                effectiveConfig.OcrEpisodeComparisonMinimumEpisodes = rule.OcrEpisodeComparisonMinimumEpisodes.Value;
 
             if (rule.EnableAnimeDetection.HasValue)
                 effectiveConfig.EnableAnimeDetection = rule.EnableAnimeDetection.Value;
@@ -243,98 +231,20 @@ namespace EmbyCredits.Services
             if (rule.AnimeDetectionMethod.HasValue)
                 effectiveConfig.AnimeDetectionMethod = rule.AnimeDetectionMethod.Value;
 
-            if (rule.BlackFrameMinimumPercentage.HasValue)
-                effectiveConfig.BlackFrameMinimumPercentage = rule.BlackFrameMinimumPercentage.Value;
-
-            if (rule.BlackFrameThreshold.HasValue)
-                effectiveConfig.BlackFrameThreshold = rule.BlackFrameThreshold.Value;
-
-            if (rule.BlackFrameMinimumDensity.HasValue)
-                effectiveConfig.BlackFrameMinimumDensity = rule.BlackFrameMinimumDensity.Value;
-
-            if (rule.BlackFrameMaxCreditsDuration.HasValue)
-                effectiveConfig.BlackFrameMaxCreditsDuration = rule.BlackFrameMaxCreditsDuration.Value;
-
-            if (rule.BlackFrameMaxSceneMergeGap.HasValue)
-                effectiveConfig.BlackFrameMaxSceneMergeGap = rule.BlackFrameMaxSceneMergeGap.Value;
-
-            if (rule.BlackFrameScanAllFrames.HasValue)
-                effectiveConfig.BlackFrameScanAllFrames = rule.BlackFrameScanAllFrames.Value;
-
-            if (rule.BlackFrameAutoFallbackToAllFrames.HasValue)
-                effectiveConfig.BlackFrameAutoFallbackToAllFrames = rule.BlackFrameAutoFallbackToAllFrames.Value;
-
-            if (rule.BlackFrameRefineCreditsBoundary.HasValue)
-                effectiveConfig.BlackFrameRefineCreditsBoundary = rule.BlackFrameRefineCreditsBoundary.Value;
-
-            if (rule.OcrEnableCharacterDensityDetection.HasValue)
-                effectiveConfig.OcrEnableCharacterDensityDetection = rule.OcrEnableCharacterDensityDetection.Value;
-
-            if (rule.OcrCharacterDensityThreshold.HasValue)
-                effectiveConfig.OcrCharacterDensityThreshold = rule.OcrCharacterDensityThreshold.Value;
-
-            if (rule.OcrCharacterDensityConsecutiveFrames.HasValue)
-                effectiveConfig.OcrCharacterDensityConsecutiveFrames = rule.OcrCharacterDensityConsecutiveFrames.Value;
-
-            if (rule.OcrCharacterDensityPrimaryMethod.HasValue)
-                effectiveConfig.OcrCharacterDensityPrimaryMethod = rule.OcrCharacterDensityPrimaryMethod.Value;
-
-            if (rule.OcrDensityRequireKeyword.HasValue)
-                effectiveConfig.OcrDensityRequireKeyword = rule.OcrDensityRequireKeyword.Value;
-
-            if (rule.OcrDensityKeywordWindowSeconds.HasValue)
-                effectiveConfig.OcrDensityKeywordWindowSeconds = rule.OcrDensityKeywordWindowSeconds.Value;
-
-            if (rule.OcrDensityRequireTemporalConsistency.HasValue)
-                effectiveConfig.OcrDensityRequireTemporalConsistency = rule.OcrDensityRequireTemporalConsistency.Value;
-
-            if (rule.OcrDensityMinimumDurationSeconds.HasValue)
-                effectiveConfig.OcrDensityMinimumDurationSeconds = rule.OcrDensityMinimumDurationSeconds.Value;
-
-            if (rule.OcrDensityRequireStyleConsistency.HasValue)
-                effectiveConfig.OcrDensityRequireStyleConsistency = rule.OcrDensityRequireStyleConsistency.Value;
-
-            if (rule.OcrDensityStyleConsistencyThreshold.HasValue)
-                effectiveConfig.OcrDensityStyleConsistencyThreshold = rule.OcrDensityStyleConsistencyThreshold.Value;
-
             if (rule.DisableDetection.HasValue)
                 effectiveConfig.DisableDetection = rule.DisableDetection.Value;
 
             if (rule.ChromaprintAnalysisPercent.HasValue)
                 effectiveConfig.ChromaprintAnalysisPercent = rule.ChromaprintAnalysisPercent.Value;
 
-            if (rule.ChromaprintMinDuration.HasValue)
-                effectiveConfig.ChromaprintMinDuration = rule.ChromaprintMinDuration.Value;
-
             if (rule.ChromaprintMaxDuration.HasValue)
                 effectiveConfig.ChromaprintMaxDuration = rule.ChromaprintMaxDuration.Value;
-
-            if (rule.ChromaprintFingerprintDuration.HasValue)
-                effectiveConfig.ChromaprintFingerprintDuration = rule.ChromaprintFingerprintDuration.Value;
-
-            if (rule.ChromaprintSimilarityThreshold.HasValue)
-                effectiveConfig.ChromaprintSimilarityThreshold = rule.ChromaprintSimilarityThreshold.Value;
-
-            if (rule.ChromaprintEnableEpisodeComparison.HasValue)
-                effectiveConfig.ChromaprintEnableEpisodeComparison = rule.ChromaprintEnableEpisodeComparison.Value;
-
-            if (rule.ChromaprintEpisodeComparisonTolerance.HasValue)
-                effectiveConfig.ChromaprintEpisodeComparisonTolerance = rule.ChromaprintEpisodeComparisonTolerance.Value;
-
-            if (rule.ChromaprintEpisodeComparisonMinimumEpisodes.HasValue)
-                effectiveConfig.ChromaprintEpisodeComparisonMinimumEpisodes = rule.ChromaprintEpisodeComparisonMinimumEpisodes.Value;
-
-            if (rule.ChromaprintStopSecondsFromEnd.HasValue)
-                effectiveConfig.ChromaprintStopSecondsFromEnd = rule.ChromaprintStopSecondsFromEnd.Value;
 
             if (rule.TimestampOffsetSeconds.HasValue)
                 effectiveConfig.TimestampOffsetSeconds = rule.TimestampOffsetSeconds.Value;
 
-            if (rule.BlackFrameMinDuration.HasValue)
-                effectiveConfig.BlackFrameMinDuration = rule.BlackFrameMinDuration.Value;
-
             if (!string.IsNullOrEmpty(rule.OcrLanguages))
-                effectiveConfig.OcrLanguages = rule.OcrLanguages;
+                effectiveConfig.OcrLanguages = rule.OcrLanguages!;
 
             if (rule.OcrPageSegmentationMode.HasValue)
                 effectiveConfig.OcrPageSegmentationMode = rule.OcrPageSegmentationMode.Value;
@@ -344,9 +254,6 @@ namespace EmbyCredits.Services
 
             if (rule.OcrPreserveInterwordSpaces.HasValue)
                 effectiveConfig.OcrPreserveInterwordSpaces = rule.OcrPreserveInterwordSpaces.Value;
-
-            if (rule.OcrMinimumConfidence.HasValue)
-                effectiveConfig.OcrMinimumConfidence = rule.OcrMinimumConfidence.Value;
 
             if (rule.OcrEnableSmartFrameSkipping.HasValue)
                 effectiveConfig.OcrEnableSmartFrameSkipping = rule.OcrEnableSmartFrameSkipping.Value;
@@ -373,7 +280,7 @@ namespace EmbyCredits.Services
                 effectiveConfig.OcrEnableRoiDetection = rule.OcrEnableRoiDetection.Value;
 
             if (!string.IsNullOrEmpty(rule.OcrRoiRegion))
-                effectiveConfig.OcrRoiRegion = rule.OcrRoiRegion;
+                effectiveConfig.OcrRoiRegion = rule.OcrRoiRegion!;
 
             if (rule.OcrEnableFuzzyMatching.HasValue)
                 effectiveConfig.OcrEnableFuzzyMatching = rule.OcrEnableFuzzyMatching.Value;
@@ -410,6 +317,18 @@ namespace EmbyCredits.Services
 
             if (rule.OcrMinimumStructureLines.HasValue)
                 effectiveConfig.OcrMinimumStructureLines = rule.OcrMinimumStructureLines.Value;
+
+            if (rule.OcrEnableHdrToneMapping.HasValue)
+                effectiveConfig.OcrEnableHdrToneMapping = rule.OcrEnableHdrToneMapping.Value;
+
+            if (rule.EnablePostCreditsSceneDetection.HasValue)
+                effectiveConfig.EnablePostCreditsSceneDetection = rule.EnablePostCreditsSceneDetection.Value;
+
+            if (rule.PostCreditsSceneAction.HasValue)
+                effectiveConfig.PostCreditsSceneAction = rule.PostCreditsSceneAction.Value;
+
+            if (rule.PostCreditsMinSceneSeconds.HasValue)
+                effectiveConfig.PostCreditsMinSceneSeconds = rule.PostCreditsMinSceneSeconds.Value;
 
             return effectiveConfig;
         }

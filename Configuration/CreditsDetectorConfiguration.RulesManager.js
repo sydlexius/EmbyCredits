@@ -14,17 +14,21 @@ define([], function () {
         1: 'HashOnly',
         2: 'OcrWithHashFallback',
         3: 'HashWithOcrFallback',
+        4: 'BlackFrameOnly',
         'OcrOnly': 0,
         'HashOnly': 1,
         'OcrWithHashFallback': 2,
-        'HashWithOcrFallback': 3
+        'HashWithOcrFallback': 3,
+        'BlackFrameOnly': 4
     };
     
     const ocrEngineMap = {
         0: 'Tesseract',
         1: 'PaddleOCR',
+        2: 'LocalTesseract',
         'Tesseract': 0,
-        'PaddleOCR': 1
+        'PaddleOCR': 1,
+        'LocalTesseract': 2
     };
     
     const animeMethodMap = {
@@ -32,6 +36,15 @@ define([], function () {
         1: 'Ocr',
         'BlackFrame': 0,
         'Ocr': 1
+    };
+
+    const postCreditsActionMap = {
+        0: 'Flag',
+        1: 'MoveMarker',
+        2: 'MoveMarker',
+        'Flag': 0,
+        'AddChapter': 1,
+        'MoveMarker': 2
     };
 
     function loadRules(view, config) {
@@ -50,6 +63,11 @@ define([], function () {
             }
             if (typeof rule.AnimeDetectionMethod === 'number') {
                 rule.AnimeDetectionMethod = animeMethodMap[rule.AnimeDetectionMethod] || null;
+            }
+            if (typeof rule.PostCreditsSceneAction === 'number') {
+                rule.PostCreditsSceneAction = postCreditsActionMap[rule.PostCreditsSceneAction] || null;
+            } else if (rule.PostCreditsSceneAction === 'AddChapter') {
+                rule.PostCreditsSceneAction = 'MoveMarker';
             }
         });
         var librariesPromise = ApiClient.getJSON(ApiClient.getUrl('Library/MediaFolders')).then(function (response) {
@@ -79,6 +97,9 @@ define([], function () {
             }
             if (serialized.AnimeDetectionMethod && typeof serialized.AnimeDetectionMethod === 'string') {
                 serialized.AnimeDetectionMethod = animeMethodMap[serialized.AnimeDetectionMethod];
+            }
+            if (serialized.PostCreditsSceneAction && typeof serialized.PostCreditsSceneAction === 'string') {
+                serialized.PostCreditsSceneAction = postCreditsActionMap[serialized.PostCreditsSceneAction];
             }
             
             return serialized;
@@ -363,34 +384,14 @@ define([], function () {
         });
         
         setupNumberInput(card, '.rule-ocr-search-start', rule, 'OcrSearchStartValue');
-        setupNumberInput(card, '.rule-ocr-minutes-from-end', rule, 'OcrMinutesFromEnd');
         setupNumberInput(card, '.rule-ocr-frame-rate', rule, 'OcrFrameRate');
-        setupNumberInput(card, '.rule-ocr-minimum-matches', rule, 'OcrMinimumMatches', true);
         setupNumberInput(card, '.rule-ocr-max-frames', rule, 'OcrMaxFramesToProcess', true);
         setupNumberInput(card, '.rule-ocr-max-duration', rule, 'OcrMaxAnalysisDuration');
-        setupNumberInput(card, '.rule-ocr-stop-seconds', rule, 'OcrStopSecondsFromEnd');
-        setupNumberInput(card, '.rule-ocr-comparison-tolerance', rule, 'OcrEpisodeComparisonTolerance');
-        setupNumberInput(card, '.rule-ocr-comparison-min-episodes', rule, 'OcrEpisodeComparisonMinimumEpisodes', true);
-        setupNumberInput(card, '.rule-black-frame-percentage', rule, 'BlackFrameMinimumPercentage', true);
-        setupNumberInput(card, '.rule-black-frame-threshold', rule, 'BlackFrameThreshold', true);
-        setupNumberInput(card, '.rule-character-density-threshold', rule, 'OcrCharacterDensityThreshold', true);
-        setupNumberInput(card, '.rule-character-density-frames', rule, 'OcrCharacterDensityConsecutiveFrames', true);
-        setupNumberInput(card, '.rule-density-keyword-window', rule, 'OcrDensityKeywordWindowSeconds');
-        setupNumberInput(card, '.rule-density-min-duration', rule, 'OcrDensityMinimumDurationSeconds');
-        setupNumberInput(card, '.rule-density-style-threshold', rule, 'OcrDensityStyleConsistencyThreshold');
         setupNumberInput(card, '.rule-chromaprint-analysis-percent', rule, 'ChromaprintAnalysisPercent');
-        setupNumberInput(card, '.rule-chromaprint-min-duration', rule, 'ChromaprintMinDuration', true);
         setupNumberInput(card, '.rule-chromaprint-max-duration', rule, 'ChromaprintMaxDuration', true);
-        setupNumberInput(card, '.rule-chromaprint-fingerprint-duration', rule, 'ChromaprintFingerprintDuration', true);
-        setupNumberInput(card, '.rule-chromaprint-similarity-threshold', rule, 'ChromaprintSimilarityThreshold');
-        setupNumberInput(card, '.rule-chromaprint-comparison-tolerance', rule, 'ChromaprintEpisodeComparisonTolerance');
-        setupNumberInput(card, '.rule-chromaprint-comparison-min-episodes', rule, 'ChromaprintEpisodeComparisonMinimumEpisodes', true);
-        setupNumberInput(card, '.rule-chromaprint-stop-seconds', rule, 'ChromaprintStopSecondsFromEnd');
         setupNumberInput(card, '.rule-timestamp-offset', rule, 'TimestampOffsetSeconds');
-        setupNumberInput(card, '.rule-black-frame-min-duration', rule, 'BlackFrameMinDuration');
         setupNumberInput(card, '.rule-ocr-page-segmentation-mode', rule, 'OcrPageSegmentationMode', true);
         setupNumberInput(card, '.rule-ocr-engine-mode', rule, 'OcrEngineMode', true);
-        setupNumberInput(card, '.rule-ocr-minimum-confidence', rule, 'OcrMinimumConfidence');
         setupNumberInput(card, '.rule-ocr-consecutive-matches-early-stop', rule, 'OcrConsecutiveMatchesForEarlyStop', true);
         setupNumberInput(card, '.rule-ocr-contrast-enhancement', rule, 'OcrContrastEnhancement');
         setupNumberInput(card, '.rule-ocr-brightness-adjustment', rule, 'OcrBrightnessAdjustment');
@@ -400,6 +401,7 @@ define([], function () {
         setupNumberInput(card, '.rule-ocr-scrolling-overlap-threshold', rule, 'OcrScrollingOverlapThreshold');
         setupNumberInput(card, '.rule-ocr-adaptive-frame-rate-min', rule, 'OcrAdaptiveFrameRateMin');
         setupNumberInput(card, '.rule-ocr-minimum-structure-lines', rule, 'OcrMinimumStructureLines', true);
+        setupNumberInput(card, '.rule-post-credits-min-scene', rule, 'PostCreditsMinSceneSeconds', true);
 
         const ocrLanguagesInput = card.querySelector('.rule-ocr-languages');
         ocrLanguagesInput.value = rule.OcrLanguages || '';
@@ -413,7 +415,6 @@ define([], function () {
             rule.OcrRoiRegion = e.target.value || null;
         });
 
-        setupBooleanSelect(card, '.rule-chromaprint-enable-episode-comparison', rule, 'ChromaprintEnableEpisodeComparison');
         setupBooleanSelect(card, '.rule-ocr-preserve-interword-spaces', rule, 'OcrPreserveInterwordSpaces');
         setupBooleanSelect(card, '.rule-ocr-enable-smart-frame-skipping', rule, 'OcrEnableSmartFrameSkipping');
         setupBooleanSelect(card, '.rule-ocr-enable-image-preprocessing', rule, 'OcrEnableImagePreprocessing');
@@ -423,7 +424,14 @@ define([], function () {
         setupBooleanSelect(card, '.rule-ocr-enable-scrolling-detection', rule, 'OcrEnableScrollingDetection');
         setupBooleanSelect(card, '.rule-ocr-enable-adaptive-frame-rate', rule, 'OcrEnableAdaptiveFrameRate');
         setupBooleanSelect(card, '.rule-ocr-enable-credit-structure-detection', rule, 'OcrEnableCreditStructureDetection');
-        setupBooleanSelect(card, '.rule-black-frame-refine-credits-boundary', rule, 'BlackFrameRefineCreditsBoundary');
+        setupBooleanSelect(card, '.rule-ocr-enable-hdr-tone-mapping', rule, 'OcrEnableHdrToneMapping');
+        setupBooleanSelect(card, '.rule-enable-post-credits', rule, 'EnablePostCreditsSceneDetection');
+
+        const postCreditsActionSelect = card.querySelector('.rule-post-credits-action');
+        postCreditsActionSelect.value = rule.PostCreditsSceneAction || '';
+        postCreditsActionSelect.addEventListener('change', (e) => {
+            rule.PostCreditsSceneAction = e.target.value || null;
+        });
         
         const keywordsInput = card.querySelector('.rule-ocr-keywords');
         keywordsInput.value = rule.OcrDetectionKeywords || '';
@@ -433,11 +441,6 @@ define([], function () {
         
         setupBooleanSelect(card, '.rule-ocr-enable-episode-comparison', rule, 'OcrEnableEpisodeComparison');
         setupBooleanSelect(card, '.rule-enable-anime-detection', rule, 'EnableAnimeDetection');
-        setupBooleanSelect(card, '.rule-ocr-enable-character-density', rule, 'OcrEnableCharacterDensityDetection');
-        setupBooleanSelect(card, '.rule-character-density-primary', rule, 'OcrCharacterDensityPrimaryMethod');
-        setupBooleanSelect(card, '.rule-density-require-keyword', rule, 'OcrDensityRequireKeyword');
-        setupBooleanSelect(card, '.rule-density-temporal-consistency', rule, 'OcrDensityRequireTemporalConsistency');
-        setupBooleanSelect(card, '.rule-density-style-consistency', rule, 'OcrDensityRequireStyleConsistency');
         setupBooleanSelect(card, '.rule-disable-detection', rule, 'DisableDetection');
         if (onChangeCallback) {
             card.querySelector('.rule-disable-detection').addEventListener('change', onChangeCallback);

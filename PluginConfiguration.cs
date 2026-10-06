@@ -26,6 +26,13 @@ namespace EmbyCredits
         LocalTesseract
     }
 
+    public enum PostCreditsSceneAction
+    {
+        Flag,
+        AddChapter,
+        MoveMarker
+    }
+
     public partial class DetectionRule
     {
         public string Id { get; set; } = Guid.NewGuid().ToString();
@@ -41,11 +48,14 @@ namespace EmbyCredits
 
     public partial class PluginConfiguration : BasePluginConfiguration
     {
-        public bool EnableAutoDetection { get; set; } = false;
+        public bool EnableAutoDetection { get; set; } = true;
         
         public double TimestampOffsetSeconds { get; set; } = 0.0;
 
-        public DetectionMode DetectionMode { get; set; } = DetectionMode.OcrOnly;
+        public DetectionMode DetectionMode { get; set; } = DetectionMode.HashOnly;
+
+        public bool EnableStrmFileProcessing { get; set; } = false;
+        public bool EnableStrmNetworkResilience { get; set; } = true;
 
 
         public bool UseCorrelationScoring { get; set; } = true;
@@ -73,9 +83,11 @@ namespace EmbyCredits
         public int CpuUsageLimit { get; set; } = 100;
         public int CpuThrottleDelayMs { get; set; } = 100;
         public int DelayBetweenEpisodesMs { get; set; } = 0;
-        public bool LowerThreadPriority { get; set; } = false;
-        public bool LowerProcessPriority { get; set; } = false;
+        public bool LowerThreadPriority { get; set; } = true;
+        public bool LowerProcessPriority { get; set; } = true;
         public string TempFolderPath { get; set; } = "";
+
+        public double FfmpegOperationTimeoutMinutes { get; set; } = 0;
 
         public bool EnableDetailedLogging { get; set; } = false;
         public bool EnableLogToFile { get; set; } = false;
@@ -97,6 +109,11 @@ namespace EmbyCredits
         public int MinimumEpisodesForNotification { get; set; } = 1;
 
         public bool PreventConcurrentPluginProcessing { get; set; } = true;
+        public bool PauseDetectionDuringPlayback { get; set; } = false;
+
+        public bool EnablePostCreditsSceneDetection { get; set; } = false;
+        public PostCreditsSceneAction PostCreditsSceneAction { get; set; } = PostCreditsSceneAction.Flag;
+        public int PostCreditsMinSceneSeconds { get; set; } = 10;
 
         public int MaxScheduledBackups { get; set; } = 10;
         public string BackupFolderPath { get; set; } = "";

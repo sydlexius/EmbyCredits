@@ -13,7 +13,16 @@ namespace EmbyCredits.Services
         protected void ScheduleSave()
         {
             if (_disposed) return;
-            var newTimer = new Timer(_ => { if (!_disposed) FlushSave(); }, null, SaveDebounceMs, Timeout.Infinite);
+            var newTimer = new Timer(_ =>
+            {
+                try
+                {
+                    if (!_disposed) FlushSave();
+                }
+                catch (Exception)
+                {
+                }
+            }, null, SaveDebounceMs, Timeout.Infinite);
             Interlocked.Exchange(ref _saveTimer, newTimer)?.Dispose();
         }
 

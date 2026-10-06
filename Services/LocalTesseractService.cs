@@ -19,9 +19,33 @@ namespace EmbyCredits.Services
 
         private static readonly string[] WellKnownPaths = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? new[] { @"C:\Program Files\Tesseract-OCR\tesseract.exe", @"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe" }
-            : new[] { "/usr/bin/tesseract", "/usr/local/bin/tesseract" };
+            : new[] { "/usr/bin/tesseract", "/usr/local/bin/tesseract", "/opt/homebrew/bin/tesseract", "/opt/local/bin/tesseract" };
+
+        private static readonly object _resolvedPathLock = new object();
+        private static string? _resolvedPathKey;
+        private static string? _resolvedPath;
 
         public static string ResolveBinaryPath(string configuredPath)
+        {
+            var key = configuredPath ?? string.Empty;
+            lock (_resolvedPathLock)
+            {
+                if (_resolvedPath != null && string.Equals(_resolvedPathKey, key, StringComparison.Ordinal) && File.Exists(_resolvedPath))
+                    return _resolvedPath;
+            }
+
+            var resolved = ResolveBinaryPathUncached(configuredPath ?? string.Empty);
+
+            lock (_resolvedPathLock)
+            {
+                _resolvedPathKey = key;
+                _resolvedPath = resolved;
+            }
+
+            return resolved;
+        }
+
+        private static string ResolveBinaryPathUncached(string configuredPath)
         {
             if (!string.IsNullOrWhiteSpace(configuredPath))
             {
@@ -31,7 +55,7 @@ namespace EmbyCredits.Services
             }
 
             var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
-            var dirs = pathEnv.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
+            var dirs = pathEnv.Split(new[] { Path.PathSeparator }, StringSplitOptions.RemoveEmptyEntries);
 
             foreach (var name in BinaryNames)
             {
@@ -67,9 +91,10 @@ namespace EmbyCredits.Services
                     RedirectStandardError = true,
                     CreateNoWindow = true
                 };
-                psi.ArgumentList.Add("--version");
+                psi.ArgumentList().Add("--version");
 
                 using var process = new Process { StartInfo = psi };
+                psi.ApplyArgumentList();
                 process.Start();
                 var stdout = process.StandardOutput.ReadToEnd();
                 var stderr = process.StandardError.ReadToEnd();
@@ -106,7 +131,7 @@ namespace EmbyCredits.Services
             try
             {
                 if (tempImage != null)
-                    await File.WriteAllBytesAsync(tempImage, imageBytes, cancellationToken).ConfigureAwait(false);
+                    await AsyncFile.WriteAllBytesAsync(tempImage, imageBytes, cancellationToken).ConfigureAwait(false);
 
                 var langArg = string.IsNullOrWhiteSpace(languages) ? "eng" : languages.Replace(',', '+');
 
@@ -119,41 +144,66 @@ namespace EmbyCredits.Services
                     RedirectStandardError = true,
                     CreateNoWindow = true
                 };
-                psi.ArgumentList.Add(tempImage ?? "-");
-                psi.ArgumentList.Add("stdout");
-                psi.ArgumentList.Add("-l");
-                psi.ArgumentList.Add(langArg);
-                psi.ArgumentList.Add("--oem");
-                psi.ArgumentList.Add(oem.ToString());
-                psi.ArgumentList.Add("--psm");
-                psi.ArgumentList.Add(psm.ToString());
+                psi.ArgumentList().Add(tempImage ?? "-");
+                psi.ArgumentList().Add("stdout");
+                psi.ArgumentList().Add("-l");
+                psi.ArgumentList().Add(langArg);
+                psi.ArgumentList().Add("--oem");
+                psi.ArgumentList().Add(oem.ToString());
+                psi.ArgumentList().Add("--psm");
+                psi.ArgumentList().Add(psm.ToString());
 
                 using var process = new Process { StartInfo = psi };
                 try
                 {
+                    psi.ApplyArgumentList();
                     process.Start();
-                    FFmpegHelper.RegisterProcess(process, "LocalTesseract OCR");
+                    FFmpegHelper.RegisterProcess(process, "LocalTesseract OCR", visibleInUi: false);
 
                     using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                     cts.CancelAfter(TimeSpan.FromSeconds(30));
 
                     var stdoutTask = process.StandardOutput.ReadToEndAsync();
                     var stderrTask = process.StandardError.ReadToEndAsync();
+                    var outputTask = Task.WhenAll(stdoutTask, stderrTask);
 
-                    if (useDirectMemoryPipeline)
+                    void KillProcess()
                     {
-                        await process.StandardInput.BaseStream.WriteAsync(imageBytes, 0, imageBytes.Length, cancellationToken).ConfigureAwait(false);
-                        process.StandardInput.Close();
+                        try
+                        {
+                            if (!process.HasExited)
+                                process.Kill();
+                        }
+                        catch { }
                     }
 
-                    await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
-
-                    var exited = await Task.Run(() => process.WaitForExit(28000), cts.Token).ConfigureAwait(false);
-
-                    if (!exited)
+                    try
                     {
-                        try { process.Kill(); } catch { }
+                        if (useDirectMemoryPipeline)
+                        {
+                            await process.StandardInput.BaseStream.WriteAsync(imageBytes, 0, imageBytes.Length, cts.Token).ConfigureAwait(false);
+                            process.StandardInput.Close();
+                        }
+
+                        var finished = await Task.WhenAny(outputTask, Task.Delay(Timeout.Infinite, cts.Token)).ConfigureAwait(false);
+                        if (finished != outputTask)
+                            throw new OperationCanceledException(cts.Token);
+
+                        await outputTask.ConfigureAwait(false);
+                    }
+                    catch (Exception ex) when (ex is OperationCanceledException || ex is IOException)
+                    {
+                        KillProcess();
+                        try { await outputTask.ConfigureAwait(false); } catch { }
+                        cancellationToken.ThrowIfCancellationRequested();
                         logger?.Warn("LocalTesseract: process timed out");
+                        return (string.Empty, 0);
+                    }
+
+                    if (!process.WaitForExit(5000))
+                    {
+                        KillProcess();
+                        logger?.Warn("LocalTesseract: process did not exit after output ended");
                         return (string.Empty, 0);
                     }
 

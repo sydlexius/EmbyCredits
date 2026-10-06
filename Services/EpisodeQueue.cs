@@ -1,64 +1,64 @@
 using MediaBrowser.Controller.Entities.TV;
 using System;
-using System.Collections.Generic;
-using System.Runtime.CompilerServices;
+using System.Collections.Concurrent;
 using System.Threading;
-using System.Threading.Channels;
 using System.Threading.Tasks;
 
 namespace EmbyCredits.Services
 {
     public class EpisodeQueue : IDisposable
     {
-        private readonly Channel<Episode> _channel;
+        private readonly ConcurrentQueue<Episode> _queue = new ConcurrentQueue<Episode>();
+        private readonly SemaphoreSlim _itemsAvailable = new SemaphoreSlim(0);
+        private bool _completed;
         private bool _disposed;
 
-        public EpisodeQueue(int capacity = 1000)
-        {
-            _channel = Channel.CreateBounded<Episode>(new BoundedChannelOptions(capacity)
-            {
-                FullMode = BoundedChannelFullMode.Wait
-            });
-        }
+        public int Count => _queue.Count;
 
-        public int Count => _channel.Reader.Count;
-
-        public async ValueTask EnqueueAsync(Episode episode, CancellationToken cancellationToken = default)
+        public Task EnqueueAsync(Episode episode, CancellationToken cancellationToken = default)
         {
-            await _channel.Writer.WriteAsync(episode, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            TryEnqueue(episode);
+            return Task.CompletedTask;
         }
 
         public bool TryEnqueue(Episode episode)
         {
-            return _channel.Writer.TryWrite(episode);
+            if (_completed)
+                return false;
+
+            _queue.Enqueue(episode);
+            _itemsAvailable.Release();
+            return true;
         }
 
-        public async ValueTask<Episode> DequeueAsync(CancellationToken cancellationToken = default)
+        public async Task<Episode> DequeueAsync(CancellationToken cancellationToken = default)
         {
-            return await _channel.Reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+            await _itemsAvailable.WaitAsync(cancellationToken).ConfigureAwait(false);
+            _queue.TryDequeue(out var episode);
+            return episode!;
         }
 
         public bool TryDequeue(out Episode? episode)
         {
-            return _channel.Reader.TryRead(out episode);
-        }
-
-        public async IAsyncEnumerable<Episode> DequeueAllAsync([EnumeratorCancellation] CancellationToken cancellationToken = default)
-        {
-            await foreach (var episode in _channel.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+            if (_queue.TryDequeue(out episode))
             {
-                yield return episode;
+                _itemsAvailable.Wait(0);
+                return true;
             }
+
+            episode = default;
+            return false;
         }
 
         public void CompleteAdding()
         {
-            _channel.Writer.Complete();
+            _completed = true;
         }
 
         public void Clear()
         {
-            while (_channel.Reader.TryRead(out _))
+            while (TryDequeue(out _))
             {
             }
         }
@@ -69,7 +69,8 @@ namespace EmbyCredits.Services
                 return;
 
             _disposed = true;
-            _channel.Writer.Complete();
+            _completed = true;
+            _itemsAvailable.Dispose();
         }
     }
 }

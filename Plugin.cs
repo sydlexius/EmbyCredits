@@ -9,6 +9,7 @@ using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Notifications;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Plugins;
+using MediaBrowser.Controller.Session;
 using MediaBrowser.Model.Drawing;
 using MediaBrowser.Model.Logging;
 using MediaBrowser.Model.Plugins;
@@ -39,6 +40,7 @@ namespace EmbyCredits
         public static TracerService? TracerService { get; private set; }
         public static PendingEpisodesService? PendingEpisodesService { get; private set; }
         public static INotificationManager? NotificationManager { get; private set; }
+        public static ISessionManager? SessionManager { get; private set; }
 
         public IApplicationPaths AppPaths => _appPaths;
 
@@ -46,11 +48,11 @@ namespace EmbyCredits
         public override string Description => "Automatically detects end credits in TV shows and saves timestamps to files.";
         public override Guid Id => Guid.Parse("b1a65a73-a620-432a-9f5b-285038031c26");
 
-        public Plugin(IApplicationPaths appPaths, IXmlSerializer xmlSerializer, ILogManager logManager, ILibraryManager libraryManager, IItemRepository itemRepository, IFfmpegManager ffmpegManager, IMediaEncoder mediaEncoder, INotificationManager notificationManager)
+        public Plugin(IApplicationPaths appPaths, IXmlSerializer xmlSerializer, ILogManager logManager, ILibraryManager libraryManager, IItemRepository itemRepository, IFfmpegManager ffmpegManager, IMediaEncoder mediaEncoder, INotificationManager notificationManager, ISessionManager sessionManager)
             : base(appPaths, xmlSerializer)
         {
             Instance = this;
-            _logger = logManager.GetLogger(GetType().Name);
+            _logger = logManager.GetLogger($"[EmbyCredits] {GetType().Name}");
             _appPaths = appPaths;
             _libraryManager = libraryManager;
             _itemRepository = itemRepository;
@@ -58,6 +60,7 @@ namespace EmbyCredits
             _mediaEncoder = mediaEncoder;
             _notificationManager = notificationManager;
             NotificationManager = notificationManager;
+            SessionManager = sessionManager;
         }
         
         public override void SaveConfiguration()
@@ -169,9 +172,13 @@ namespace EmbyCredits
                     };
                 }
 
+                var isWindows = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
+                    System.Runtime.InteropServices.OSPlatform.Windows);
+                var comparablePath = normalizedPath.EndsWith("/") ? normalizedPath : normalizedPath + "/";
+
                 foreach (var forbidden in forbiddenPaths)
                 {
-                    if (normalizedPath.Contains(forbidden))
+                    if (isWindows ? normalizedPath.Contains(forbidden) : comparablePath.StartsWith(forbidden, StringComparison.Ordinal))
                     {
                         _logger.Warn($"{fieldName} points to system directory. Clearing value.");
                         return string.Empty;
@@ -322,8 +329,47 @@ namespace EmbyCredits
             };
         }
 
+        private void MigrateHardwareAccelerationSettings()
+        {
+            try
+            {
+                var config = Configuration;
+                var legacyType = config.BlackFrameHardwareAccelerationType;
+                var legacyDevice = config.BlackFrameHardwareDevice;
+                var hasLegacy = Services.Utilities.FFmpegHelper.IsHardwareDecodeEnabled(legacyType) || !string.IsNullOrWhiteSpace(legacyDevice);
+                if (!hasLegacy)
+                    return;
+
+                var sharedEnabled = config.OcrEnableHardwareAcceleration &&
+                                    Services.Utilities.FFmpegHelper.IsHardwareDecodeEnabled(config.OcrHardwareAccelerationType);
+
+                if (!sharedEnabled && Services.Utilities.FFmpegHelper.IsHardwareDecodeEnabled(legacyType))
+                {
+                    config.OcrEnableHardwareAcceleration = true;
+                    config.OcrHardwareAccelerationType = legacyType;
+                    if (string.IsNullOrWhiteSpace(config.OcrHardwareDevice))
+                        config.OcrHardwareDevice = legacyDevice ?? string.Empty;
+                    _logger.Info($"Hardware acceleration is now one shared setting - moved the Black Frame setting ({legacyType}) to it");
+                }
+                else if (sharedEnabled)
+                {
+                    _logger.Info($"Hardware acceleration is now one shared setting - Black Frame detection uses {config.OcrHardwareAccelerationType}");
+                }
+
+                config.BlackFrameHardwareAccelerationType = "none";
+                config.BlackFrameHardwareDevice = string.Empty;
+                base.SaveConfiguration();
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn($"Could not migrate hardware acceleration settings: {ex.Message}");
+            }
+        }
+
         public void Run()
         {
+            MigrateHardwareAccelerationSettings();
+
             CreditsDetectionService.SetLibraryManager(_libraryManager);
             CreditsDetectionService.SetItemRepository(_itemRepository);
             CreditsDetectionService.SetFfmpegManager(_ffmpegManager);
@@ -366,6 +412,16 @@ namespace EmbyCredits
             if (disposing)
             {
                 CreditsDetectionService.Stop();
+
+                try
+                {
+                    PendingEpisodesService?.Dispose();
+                    TracerService?.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warn($"Error saving pending/tracer state during shutdown: {ex.Message}");
+                }
 
                 try
                 {

@@ -30,9 +30,19 @@ namespace EmbyCredits
         public double ChromaprintMinimumScoreFloor { get; set; } = 0.55;
         public double ChromaprintStopSecondsFromEnd { get; set; } = 20.0;
 
-        public bool ChromaprintLowerProcessPriority { get; set; } = false;
+        public bool ChromaprintUseMultiPeerConsensus { get; set; } = true;
+        public int ChromaprintConsensusPeerCount { get; set; } = 3;
+
+        public bool ChromaprintRejectRepeatingSegments { get; set; } = true;
+        public double ChromaprintRepeatingSegmentThreshold { get; set; } = 0.75;
+        public double ChromaprintRepeatingSegmentCheckSeconds { get; set; } = 90.0;
+
+        public bool ChromaprintUseBoundarySearch { get; set; } = true;
+        public bool ChromaprintUseSubFrameInterpolation { get; set; } = true;
+
+        public bool ChromaprintLowerProcessPriority { get; set; } = true;
         public int ChromaprintFfmpegThreads { get; set; } = 2;
-        public int ChromaprintParallelSessions { get; set; } = 2;
+        public int ChromaprintParallelSessions { get; set; } = 1;
         public int ChromaprintDelayBetweenOperationsMs { get; set; } = 0;
     }
 }

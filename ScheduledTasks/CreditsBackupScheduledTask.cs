@@ -21,7 +21,7 @@ namespace EmbyCredits.ScheduledTasks
 
         public string Name => "Backup Credits Markers";
         public string Description => "Creates a backup of all credits markers to a JSON file";
-        public string Category => "Library";
+        public string Category => ScheduledDetectionRunner.TaskCategory;
         public string Key => "CreditsBackup";
 
         public CreditsBackupScheduledTask(
@@ -30,7 +30,7 @@ namespace EmbyCredits.ScheduledTasks
             IItemRepository itemRepository,
             IApplicationPaths appPaths)
         {
-            _logger = logManager.GetLogger(GetType().Name);
+            _logger = logManager.GetLogger($"[EmbyCredits] {GetType().Name}");
             _libraryManager = libraryManager;
             _itemRepository = itemRepository;
             _appPaths = appPaths;
@@ -91,15 +91,7 @@ namespace EmbyCredits.ScheduledTasks
 
         public IEnumerable<TaskTriggerInfo> GetDefaultTriggers()
         {
-            return new[]
-            {
-                new TaskTriggerInfo
-                {
-                    Type = TaskTriggerInfo.TriggerWeekly,
-                    DayOfWeek = DayOfWeek.Sunday,
-                    TimeOfDayTicks = TimeSpan.FromHours(3).Ticks
-                }
-            };
+            return Array.Empty<TaskTriggerInfo>();
         }
     }
 }

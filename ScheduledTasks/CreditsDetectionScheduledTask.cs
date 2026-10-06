@@ -1,5 +1,4 @@
 using MediaBrowser.Common.Configuration;
-using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Persistence;
@@ -23,7 +22,7 @@ namespace EmbyCredits.ScheduledTasks
 
         public string Name => "Detect Credits in TV Shows";
         public string Description => "Scans TV shows in selected libraries and detects end credits timestamps";
-        public string Category => "Library";
+        public string Category => ScheduledDetectionRunner.TaskCategory;
         public string Key => "CreditsDetection";
 
         public CreditsDetectionScheduledTask(
@@ -32,7 +31,7 @@ namespace EmbyCredits.ScheduledTasks
             IApplicationPaths appPaths,
             IItemRepository itemRepository)
         {
-            _logger = logManager.GetLogger(GetType().Name);
+            _logger = logManager.GetLogger($"[EmbyCredits] {GetType().Name}");
             _libraryManager = libraryManager;
             _appPaths = appPaths;
             _itemRepository = itemRepository;
@@ -55,7 +54,6 @@ namespace EmbyCredits.ScheduledTasks
             try
             {
                 var config = Plugin.Instance.Configuration;
-                var libraryIds = config.LibraryIds ?? Array.Empty<string>();
 
                 CreditsDetectionService.SetLibraryManager(_libraryManager);
                 CreditsDetectionService.SetItemRepository(_itemRepository);
@@ -73,137 +71,33 @@ namespace EmbyCredits.ScheduledTasks
                         return;
                     }
 
-                    var pendingBySeason = new Dictionary<(string seriesId, int season), List<Episode>>();
                     foreach (var id in pendingIds)
                     {
-                        if (!Guid.TryParse(id, out var guid)) continue;
-                        var ep = _libraryManager.GetItemById(guid) as Episode;
-                        if (ep == null || ep.ParentIndexNumber == null || ep.ParentIndexNumber == 0 || ep.Series == null)
-                            continue;
+                        Episode? ep = null;
+                        if (Guid.TryParse(id, out var guid))
+                            ep = _libraryManager.GetItemById(guid) as Episode;
 
-                        var key = (ep.Series.Id.ToString(), ep.ParentIndexNumber.Value);
-                        if (!pendingBySeason.ContainsKey(key))
-                            pendingBySeason[key] = new List<Episode>();
-                        pendingBySeason[key].Add(ep);
+                        if (ep == null || ep.ParentIndexNumber == null || ep.ParentIndexNumber == 0 || ep.Series == null)
+                        {
+                            Plugin.PendingEpisodesService.MarkProcessed(id);
+                            continue;
+                        }
+
+                        allEpisodes.Add(ep);
                     }
 
-                    if (pendingBySeason.Count == 0)
+                    if (allEpisodes.Count == 0)
                     {
                         _logger.Info("No resolvable pending episodes found (items may have been removed from library)");
-                        foreach (var id in pendingIds)
-                            Plugin.PendingEpisodesService.MarkProcessed(id);
                         return;
                     }
 
-                    foreach (var kvp in pendingBySeason)
-                    {
-                        var (seriesId, seasonNumber) = kvp.Key;
-                        var firstPending = kvp.Value.First();
-                        var series = firstPending.Series!;
-
-                        var seasonItem = firstPending.ParentId != 0
-                            ? _libraryManager.GetItemById(firstPending.ParentId)
-                            : null;
-                        long ancestorId = seasonItem?.InternalId ?? series.InternalId;
-
-                        var seasonEps = _libraryManager.GetItemList(new InternalItemsQuery
-                        {
-                            IncludeItemTypes = new[] { "Episode" },
-                            IsVirtualItem = false,
-                            HasPath = true,
-                            AncestorIds = new[] { ancestorId }
-                        }).OfType<Episode>()
-                          .Where(e => e.ParentIndexNumber == seasonNumber && e.ParentIndexNumber != 0)
-                          .ToList();
-
-                        allEpisodes.AddRange(seasonEps);
-                        _logger.Info($"Pending queue: queued {seasonEps.Count} episode(s) from {series.Name} Season {seasonNumber} (includes full season for Chromaprint)");
-                    }
-
                     allEpisodes = allEpisodes.GroupBy(e => e.Id).Select(g => g.First()).ToList();
+                    _logger.Info($"Pending queue: {allEpisodes.Count} episode(s) to process");
                 }
                 else
                 {
-                    List<Folder> librariesToProcess;
-
-                    if (libraryIds.Length == 0)
-                    {
-                        _logger.Info("No specific libraries configured, processing all TV Show and Mixed libraries");
-
-                        var allLibraries = _libraryManager.GetItemList(new InternalItemsQuery
-                        {
-                            IncludeItemTypes = new[] { "CollectionFolder" }
-                        }).ToList();
-
-                        librariesToProcess = allLibraries
-                            .Where(lib =>
-                            {
-                                var collectionType = lib.GetType().GetProperty("CollectionType")?.GetValue(lib) as string;
-                                return collectionType == "tvshows" || collectionType == "mixed" || string.IsNullOrEmpty(collectionType);
-                            })
-                            .OfType<Folder>()
-                            .ToList();
-                    }
-                    else
-                    {
-                        librariesToProcess = new List<Folder>();
-                        foreach (var libraryId in libraryIds)
-                        {
-                            Folder? library = null;
-
-                            if (Guid.TryParse(libraryId, out var libraryGuid))
-                            {
-                                library = _libraryManager.GetItemById(libraryGuid) as Folder;
-                            }
-                            else if (long.TryParse(libraryId, out var libraryInternalId))
-                            {
-                                library = _libraryManager.GetItemById(libraryInternalId) as Folder;
-                            }
-                            else
-                            {
-                                _logger.Warn($"Invalid library ID format: {libraryId}");
-                                continue;
-                            }
-
-                            if (library != null)
-                                librariesToProcess.Add(library);
-                            else
-                                _logger.Warn($"Library not found: {libraryId}");
-                        }
-                    }
-
-                    _logger.Info($"Starting scheduled credits detection for {librariesToProcess.Count} libraries");
-
-                    foreach (var library in librariesToProcess)
-                    {
-                        if (cancellationToken.IsCancellationRequested)
-                            break;
-
-                        try
-                        {
-                            _logger.Info($"Scanning library: {library.Name}");
-
-                            var query = new InternalItemsQuery
-                            {
-                                IncludeItemTypes = new[] { "Episode" },
-                                IsVirtualItem = false,
-                                HasPath = true,
-                                Recursive = true,
-                                Parent = library
-                            };
-
-                            var allLibraryEpisodes = _libraryManager.GetItemList(query).OfType<Episode>().ToList();
-                            var episodes = allLibraryEpisodes.Where(e => e.ParentIndexNumber != null && e.ParentIndexNumber != 0).ToList();
-                            var specialCount = allLibraryEpisodes.Count - episodes.Count;
-                            allEpisodes.AddRange(episodes);
-
-                            _logger.Info($"Found {episodes.Count} episodes in {library.Name} (excluded {specialCount} specials)");
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.ErrorException($"Error processing library {library.Name}", ex);
-                        }
-                    }
+                    allEpisodes = ScheduledDetectionRunner.GetLibraryEpisodes(_libraryManager, config, _logger, cancellationToken);
                 }
 
                 if (allEpisodes.Count == 0)
@@ -214,33 +108,8 @@ namespace EmbyCredits.ScheduledTasks
 
                 _logger.Info($"Found {allEpisodes.Count} total episodes");
 
-                var episodesToProcess = new List<Episode>();
-                var skipCount = 0;
-
-                if (config.ScheduledTaskOnlyProcessMissing)
-                {
-                    foreach (var episode in allEpisodes)
-                    {
-                        if (cancellationToken.IsCancellationRequested)
-                            break;
-
-                        if (!HasCreditsMarker(episode))
-                        {
-                            episodesToProcess.Add(episode);
-                        }
-                        else
-                        {
-                            skipCount++;
-                        }
-                    }
-
-                    _logger.Info($"Processing {episodesToProcess.Count} episodes (skipping {skipCount} episodes with existing credits)");
-                }
-                else
-                {
-                    episodesToProcess = allEpisodes;
-                    _logger.Info($"Processing all {episodesToProcess.Count} episodes (reprocess mode enabled)");
-                }
+                var episodesToProcess = ScheduledDetectionRunner.FilterEpisodesNeedingDetection(
+                    allEpisodes, config, _itemRepository, _logger, config.ScheduledTaskOnlyProcessMissing, cancellationToken);
 
                 if (episodesToProcess.Count == 0)
                 {
@@ -248,108 +117,7 @@ namespace EmbyCredits.ScheduledTasks
                     return;
                 }
 
-                if (config.SkipPreviouslyFailedEpisodes && !config.IgnoreFailureMarkers)
-                {
-                    var beforeFailFilter = episodesToProcess.Count;
-                    episodesToProcess = episodesToProcess
-                        .Where(ep => !(ep.ProviderIds?.TryGetValue("EmbyCredits.Fail", out var fv) == true && fv == "true"))
-                        .ToList();
-                    var skippedFailed = beforeFailFilter - episodesToProcess.Count;
-                    if (skippedFailed > 0)
-                        _logger.Info($"Skipping {skippedFailed} previously failed episode(s) (not retrying)");
-                    if (episodesToProcess.Count == 0)
-                    {
-                        _logger.Info("All remaining episodes were previously failed, nothing to process");
-                        return;
-                    }
-                }
-
-                Plugin.Progress.Reset();
-                Plugin.Progress.TotalItems = episodesToProcess.Count;
-                Plugin.Progress.IsRunning = true;
-                Plugin.Progress.StartTime = DateTime.Now;
-
-                CreditsDetectionService.ResetForScheduledTask();
-                cancellationToken.Register(() => CreditsDetectionService.CancelProcessing());
-
-                var failedEpisodeNames = new List<string>();
-                var successfulSeriesNames = new HashSet<string>();
-
-                var episodesBySeason = episodesToProcess
-                    .Where(e => e.Series != null && e.ParentIndexNumber.HasValue)
-                    .GroupBy(e => new { SeriesId = e.Series!.Id.ToString(), SeasonNumber = e.ParentIndexNumber!.Value })
-                    .ToList();
-
-                _logger.Info($"Grouped {episodesToProcess.Count} episodes into {episodesBySeason.Count} seasons for batch processing");
-
-                using var progressReporterCts = new CancellationTokenSource();
-                var progressReporterTask = Task.Run(async () =>
-                {
-                    while (!progressReporterCts.Token.IsCancellationRequested)
-                    {
-                        var total = Plugin.Progress.TotalItems;
-                        if (total > 0)
-                        {
-                            progress.Report((double)Plugin.Progress.ProcessedItems / total * 100);
-                        }
-                        try { await Task.Delay(1000, progressReporterCts.Token); } catch (OperationCanceledException) { break; }
-                    }
-                });
-
-                foreach (var seasonGroup in episodesBySeason)
-                {
-                    if (cancellationToken.IsCancellationRequested || CreditsDetectionService.IsCancellationRequested)
-                    {
-                        _logger.Info("Cancellation requested, stopping credits detection");
-                        break;
-                    }
-
-                    var seasonEpisodes = seasonGroup.OrderBy(e => e.IndexNumber).ToList();
-                    var firstEpisode = seasonEpisodes.First();
-                    var seriesName = firstEpisode.Series?.Name ?? "Unknown Series";
-                    
-                    _logger.Info($"Processing season batch: {seriesName} Season {seasonGroup.Key.SeasonNumber} ({seasonEpisodes.Count} episodes)");
-
-                    try
-                    {
-                        await CreditsDetectionService.ProcessSeasonBatch(seasonEpisodes, cancellationToken);
-                        successfulSeriesNames.Add(seriesName);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.ErrorException($"Error processing season batch {seriesName} S{seasonGroup.Key.SeasonNumber}", ex);
-                        Plugin.Progress.FailedItems += seasonEpisodes.Count;
-                        
-                        foreach (var episode in seasonEpisodes)
-                        {
-                            var episodeLabel = $"{seriesName} S{episode.ParentIndexNumber:00}E{episode.IndexNumber:00} - {episode.Name}";
-                            failedEpisodeNames.Add(episodeLabel);
-                        }
-                    }
-
-                    try { await Task.Delay(1000, cancellationToken); } catch (OperationCanceledException) { }
-                }
-
-                progressReporterCts.Cancel();
-                try { await progressReporterTask; } catch (Exception) { }
-                progress.Report(100);
-
-                await CreditsDetectionService.RunAutoBackupForEpisodes(episodesToProcess, isDryRun: false);
-
-                Plugin.Progress.IsRunning = false;
-                Plugin.Progress.EndTime = DateTime.Now;
-                Plugin.Progress.CurrentItem = (cancellationToken.IsCancellationRequested || CreditsDetectionService.IsCancellationRequested)
-                    ? "Cancelled"
-                    : "Complete";
-                
-                EmbyCredits.Services.DetectionMethods.OcrDetection.ClearAllCache();
-                EmbyCredits.Services.DetectionMethods.ChromaprintDetection.ClearAllCache();
-                EmbyCredits.Services.DetectionMethods.BlackFrameDetection.ClearAllCache();
-
-                _logger.Info($"Credits detection complete. Processed: {Plugin.Progress.SuccessfulItems}, Failed: {Plugin.Progress.FailedItems}");
-
-                var duration = DateTime.Now - Plugin.Progress.StartTime;
-                SendCompletionNotification(Plugin.Progress.SuccessfulItems, Plugin.Progress.FailedItems, episodesToProcess.Count, failedEpisodeNames, successfulSeriesNames.ToList(), duration ?? TimeSpan.Zero);
+                await ScheduledDetectionRunner.RunDetectionAsync(episodesToProcess, _logger, progress, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
@@ -357,87 +125,9 @@ namespace EmbyCredits.ScheduledTasks
             }
         }
 
-        private void SendCompletionNotification(int successCount, int failedCount, int totalProcessed, List<string> failedEpisodes, List<string> successfulSeries, TimeSpan duration)
-        {
-            try
-            {
-                if (Plugin.Instance == null)
-                {
-                    _logger.Debug("Plugin instance not available");
-                    return;
-                }
-
-                var notificationManager = Plugin.Instance.GetNotificationManager();
-                if (notificationManager == null)
-                {
-                    _logger.Debug("Notification manager not available");
-                    return;
-                }
-
-                var config = Plugin.Instance.Configuration;
-                var notificationService = new NotificationService(_logger, notificationManager, config);
-                notificationService.SendScheduledTaskCompletionNotification(successCount, failedCount, totalProcessed, failedEpisodes, successfulSeries, duration);
-            }
-            catch (Exception ex)
-            {
-                _logger.ErrorException("Failed to send completion notification", ex);
-            }
-        }
-
-        private bool HasCreditsMarker(Episode episode)
-        {
-            try
-            {
-                var chapters = _itemRepository.GetChapters(episode)?.ToList();
-                if (chapters == null || chapters.Count == 0)
-                    return false;
-
-                return chapters.Any(c =>
-                {
-                    var markerType = GetMarkerType(c);
-                    return markerType == "CreditsStart";
-                });
-            }
-            catch (Exception ex)
-            {
-                _logger.ErrorException($"Error checking credits marker for {episode.Name}", ex);
-                return false;
-            }
-        }
-
-        private static string? GetMarkerType(MediaBrowser.Model.Entities.ChapterInfo chapter)
-        {
-            try
-            {
-                var markerTypeProperty = chapter.GetType().GetProperty("MarkerType");
-                if (markerTypeProperty != null)
-                {
-                    var value = markerTypeProperty.GetValue(chapter);
-                    if (value != null)
-                    {
-                        return value.ToString();
-                    }
-                }
-            }
-            catch
-            {
-            }
-
-            return null;
-        }
-
         public IEnumerable<TaskTriggerInfo> GetDefaultTriggers()
         {
-
-            return new[]
-            {
-                new TaskTriggerInfo
-                {
-                    Type = TaskTriggerInfo.TriggerWeekly,
-                    DayOfWeek = DayOfWeek.Sunday,
-                    TimeOfDayTicks = TimeSpan.FromHours(2).Ticks
-                }
-            };
+            return Array.Empty<TaskTriggerInfo>();
         }
     }
 }

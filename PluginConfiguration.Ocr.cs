@@ -26,6 +26,7 @@ namespace EmbyCredits
         public double OcrMaxAnalysisDuration { get; set; } = 600.0;
         public double OcrStopSecondsFromEnd { get; set; } = 20.0;
         public int OcrJpegQuality { get; set; } = 92;
+        public bool OcrEnableHdrToneMapping { get; set; } = false;
         public int OcrMaxResolutionHeight { get; set; } = 1080;
         public int OcrDelayBetweenFramesMs { get; set; } = 0;
 
@@ -51,8 +52,8 @@ namespace EmbyCredits
         public int OcrRetryDelayMs { get; set; } = 2000;
 
         public string OcrFfmpegPreInputArgs { get; set; } = "";
-        public int OcrFfmpegThreads { get; set; } = 0;
-        public int OcrFfmpegFilterThreads { get; set; } = 0;
+        public int OcrFfmpegThreads { get; set; } = 2;
+        public int OcrFfmpegFilterThreads { get; set; } = 1;
         public bool OcrEnableHardwareAcceleration { get; set; } = false;
         public string OcrHardwareAccelerationType { get; set; } = "none";
         public string OcrHardwareDevice { get; set; } = "";

@@ -112,7 +112,6 @@ define(['loading', 'toast'], function (loading, toast) {
                     });
                 }
 
-                // Render detected history section
                 if (detectedSection) {
                     if (detected.length === 0) {
                         detectedSection.style.display = 'none';
@@ -142,7 +141,6 @@ define(['loading', 'toast'], function (loading, toast) {
                     }
                 }
 
-                // Render failed history section
                 if (failedSection) {
                     if (failed.length === 0) {
                         failedSection.style.display = 'none';

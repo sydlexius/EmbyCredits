@@ -36,7 +36,29 @@ define(['baseView', 'loading', 'toast', 'emby-input', 'emby-button', 'emby-check
             const btnResetToDefaults = view.querySelector('#btnResetToDefaults');
             if (btnResetToDefaults) {
                 btnResetToDefaults.addEventListener('click', () => {
-                    dataManager.resetToDefaults(view);
+                    dataManager.resetToDefaults(this, view);
+                });
+            }
+
+            const btnToggleAdvancedSettings = view.querySelector('#btnToggleAdvancedSettings');
+            if (btnToggleAdvancedSettings) {
+                const advancedStorageKey = 'creditsDetector_showAdvancedSettings';
+                let showAdvanced = false;
+                try {
+                    showAdvanced = localStorage.getItem(advancedStorageKey) === 'true';
+                } catch (e) {
+                    showAdvanced = false;
+                }
+                this.applyAdvancedSettingsVisibility(view, showAdvanced);
+
+                btnToggleAdvancedSettings.addEventListener('click', () => {
+                    showAdvanced = !showAdvanced;
+                    this.applyAdvancedSettingsVisibility(view, showAdvanced);
+                    try {
+                        localStorage.setItem(advancedStorageKey, showAdvanced ? 'true' : 'false');
+                    } catch (e) {
+                        console.warn('Unable to remember advanced settings state:', e);
+                    }
                 });
             }
 
@@ -58,41 +80,6 @@ define(['baseView', 'loading', 'toast', 'emby-input', 'emby-button', 'emby-check
             if (btnBrowseLogFolder) {
                 btnBrowseLogFolder.addEventListener('click', () => {
                     dataManager.browseLogFolder(view);
-                });
-            }
-
-            const btnResetAllExceptFolders = view.querySelector('#btnResetAllExceptFolders');
-            if (btnResetAllExceptFolders) {
-                btnResetAllExceptFolders.addEventListener('click', () => {
-                    dataManager.resetAllExceptFolders(view);
-                });
-            }
-
-            const btnPresetSmallMachine = view.querySelector('#btnPresetSmallMachine');
-            if (btnPresetSmallMachine) {
-                btnPresetSmallMachine.addEventListener('click', () => {
-                    dataManager.applySmallMachinePreset(view);
-                });
-            }
-
-            const btnPresetNormalMachine = view.querySelector('#btnPresetNormalMachine');
-            if (btnPresetNormalMachine) {
-                btnPresetNormalMachine.addEventListener('click', () => {
-                    dataManager.applyNormalMachinePreset(view);
-                });
-            }
-
-            const btnPresetHighEndMachine = view.querySelector('#btnPresetHighEndMachine');
-            if (btnPresetHighEndMachine) {
-                btnPresetHighEndMachine.addEventListener('click', () => {
-                    dataManager.applyHighEndMachinePreset(view);
-                });
-            }
-
-            const btnPresetDedicatedMachine = view.querySelector('#btnPresetDedicatedMachine');
-            if (btnPresetDedicatedMachine) {
-                btnPresetDedicatedMachine.addEventListener('click', () => {
-                    dataManager.applyDedicatedMachinePreset(view);
                 });
             }
 
@@ -254,16 +241,84 @@ define(['baseView', 'loading', 'toast', 'emby-input', 'emby-button', 'emby-check
                     });
                 };
                 
+                const ocrModes = ['OcrOnly', 'OcrWithHashFallback', 'HashWithOcrFallback', 0, 2, 3];
+
+                const rulesUseOcr = () => {
+                    const loadedRules = rulesManager.getRulesData() || [];
+                    const rules = loadedRules.length > 0 ? loadedRules : ((this.config && this.config.DetectionRules) || []);
+                    return rules.some(rule => rule && rule.DisableDetection !== true &&
+                        (ocrModes.includes(rule.DetectionMode) || rule.AnimeDetectionMethod === 'Ocr' || rule.AnimeDetectionMethod === 1));
+                };
+
+                const updateOcrSetupVisibility = () => {
+                    const mode = detectionModeSelect.value;
+                    const chkAnime = view.querySelector('#chkEnableAnimeDetection');
+                    const selectAnimeMethod = view.querySelector('#selectAnimeDetectionMethod');
+                    const modeUsesOcr = ocrModes.includes(mode);
+                    const animeUsesOcr = !!(chkAnime && chkAnime.checked && selectAnimeMethod && selectAnimeMethod.value === 'Ocr');
+                    const showOcr = modeUsesOcr || animeUsesOcr || rulesUseOcr();
+
+                    const ocrSetupSection = view.querySelector('#ocrSetupSection');
+                    if (ocrSetupSection) ocrSetupSection.style.display = showOcr ? '' : 'none';
+
+                    view.querySelectorAll('.ocr-only').forEach(el => {
+                        el.style.display = showOcr ? '' : 'none';
+                    });
+
+                    const ocrEnhancementsTab = view.querySelector('.nav-button[data-target="ocrEnhancementsPage"]');
+                    if (ocrEnhancementsTab) ocrEnhancementsTab.style.display = showOcr ? '' : 'none';
+                };
+
+                view.addEventListener('change', (e) => {
+                    if (e.target && e.target.closest && e.target.closest('.rule-card')) {
+                        updateOcrSetupVisibility();
+                    }
+                });
+
+                const btnAddRule = view.querySelector('#btnAddRule');
+                if (btnAddRule) {
+                    btnAddRule.addEventListener('click', () => setTimeout(updateOcrSetupVisibility, 0));
+                }
+
+                const rulesContainer = view.querySelector('#rulesContainer');
+                if (rulesContainer) {
+                    rulesContainer.addEventListener('click', (e) => {
+                        if (e.target && e.target.closest && e.target.closest('.rule-delete-btn')) {
+                            setTimeout(updateOcrSetupVisibility, 0);
+                        }
+                    });
+                }
+
                 detectionModeSelect.addEventListener('change', () => {
                     updateCollapsibleColors();
+                    updateOcrSetupVisibility();
                 });
-                
+
+                const chkEnableAnimeDetection = view.querySelector('#chkEnableAnimeDetection');
+                if (chkEnableAnimeDetection) {
+                    chkEnableAnimeDetection.addEventListener('change', updateOcrSetupVisibility);
+                }
+
+                const selectAnimeDetectionMethod = view.querySelector('#selectAnimeDetectionMethod');
+                if (selectAnimeDetectionMethod) {
+                    selectAnimeDetectionMethod.addEventListener('change', updateOcrSetupVisibility);
+                }
+
                 view.addEventListener('detectionMethodLoaded', () => {
                     updateCollapsibleColors();
+                    updateOcrSetupVisibility();
                 });
-                
+
                 updateCollapsibleColors();
+                updateOcrSetupVisibility();
             }
+
+            view.addEventListener('change', () => this.updateDependentFields(view));
+            view.addEventListener('input', (e) => {
+                if (e.target && e.target.id === 'txtCpuUsageLimit') this.updateDependentFields(view);
+            });
+            view.addEventListener('detectionMethodLoaded', () => this.updateDependentFields(view));
+            this.updateDependentFields(view);
 
             const btnBulkExportSeries = view.querySelector('#btnBulkExportSeries');
             if (btnBulkExportSeries) {
@@ -496,6 +551,29 @@ define(['baseView', 'loading', 'toast', 'emby-input', 'emby-button', 'emby-check
                 
                 displayArea.appendChild(chip);
             });
+        }
+
+        updateDependentFields(view) {
+            view.querySelectorAll('[data-show-when-checked]').forEach(el => {
+                const source = view.querySelector('#' + el.getAttribute('data-show-when-checked'));
+                el.style.display = source && source.checked ? '' : 'none';
+            });
+
+            view.querySelectorAll('[data-show-when-below]').forEach(el => {
+                const parts = el.getAttribute('data-show-when-below').split(':');
+                const source = view.querySelector('#' + parts[0]);
+                const value = source ? Number.parseFloat(source.value) : Number.NaN;
+                el.style.display = !Number.isNaN(value) && value < Number.parseFloat(parts[1]) ? '' : 'none';
+            });
+        }
+
+        applyAdvancedSettingsVisibility(view, showAdvanced) {
+            const container = view.querySelector('#advancedSettingsContainer');
+            const icon = view.querySelector('#iconToggleAdvancedSettings');
+            const label = view.querySelector('#lblToggleAdvancedSettings');
+            if (container) container.style.display = showAdvanced ? '' : 'none';
+            if (icon) icon.textContent = showAdvanced ? 'expand_less' : 'expand_more';
+            if (label) label.textContent = showAdvanced ? 'Hide Advanced Settings' : 'Show Advanced Settings';
         }
 
         enforceDropdownStyles(view) {

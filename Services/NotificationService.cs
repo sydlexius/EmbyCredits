@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace EmbyCredits.Services
 {
@@ -108,6 +109,22 @@ namespace EmbyCredits.Services
             sb.AppendLine($"Credits detection task completed in {FormatDuration(duration)}");
             sb.AppendLine();
             sb.AppendLine($"✓ Successfully processed: {successCount} episodes");
+
+            var methodBreakdown = GetMethodBreakdown();
+            var backupRestoredCount = EmbyCredits.Plugin.Progress.BackupRestoredCount;
+            if (methodBreakdown.Count > 0 || backupRestoredCount > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("Detection methods used:");
+                foreach (var method in methodBreakdown.OrderByDescending(kvp => kvp.Value))
+                {
+                    sb.AppendLine($"  • {method.Key}: {method.Value}");
+                }
+                if (backupRestoredCount > 0)
+                {
+                    sb.AppendLine($"  • From Backup - {backupRestoredCount}");
+                }
+            }
             
             if (successfulSeries != null && successfulSeries.Any())
             {
@@ -153,6 +170,41 @@ namespace EmbyCredits.Services
             var result = sb.ToString();
             sb.Clear();
             return result;
+        }
+
+        private Dictionary<string, int> GetMethodBreakdown()
+        {
+            var counts = new Dictionary<string, int>();
+
+            foreach (var detail in EmbyCredits.Plugin.Progress.SuccessDetails.Values)
+            {
+                var method = ExtractMethodName(detail);
+                counts[method] = counts.TryGetValue(method, out var existing) ? existing + 1 : 1;
+            }
+
+            return counts;
+        }
+
+        private string ExtractMethodName(string detail)
+        {
+            var match = Regex.Match(detail, @"\[(.*?)\]");
+            if (match.Success)
+            {
+                var method = match.Groups[1].Value;
+                if (method.Equals("OCR Detection", StringComparison.OrdinalIgnoreCase))
+                    return "OCR";
+                if (method.Equals("Chromaprint Audio Fingerprint Detection", StringComparison.OrdinalIgnoreCase))
+                    return "Chromaprint";
+                return method;
+            }
+
+            if (detail.IndexOf("imported from embedded chapter", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "Embedded Chapter";
+
+            if (detail.IndexOf("already exists", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "Existing Marker";
+
+            return "Unknown";
         }
 
         private string FormatDuration(TimeSpan duration)

@@ -11,10 +11,8 @@ namespace EmbyCredits.Services.Utilities
     {
         private readonly PluginConfiguration _configuration;
         private readonly ILogger? _logger;
-        private DateTime _lastWorkTime = DateTime.UtcNow;
-        private TimeSpan _lastWorkDuration = TimeSpan.Zero;
         private static readonly bool IsWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
-        private static readonly bool IsLinux = RuntimeInformation.IsOSPlatform(OSPlatform.Linux);
+        private const int MaxThrottleDelayMs = 10 * 60 * 1000;
 
         public CpuThrottler(PluginConfiguration configuration, ILogger? logger = null)
         {
@@ -22,25 +20,24 @@ namespace EmbyCredits.Services.Utilities
             _logger = logger;
         }
 
-        public void BeginWork()
+        public long BeginWork()
         {
-            _lastWorkTime = DateTime.UtcNow;
+            return Stopwatch.GetTimestamp();
         }
 
-        public async Task EndWork(CancellationToken cancellationToken = default)
+        public async Task EndWork(long workStartTimestamp, CancellationToken cancellationToken = default)
         {
-            _lastWorkDuration = DateTime.UtcNow - _lastWorkTime;
-
             if (_configuration.CpuUsageLimit >= 100)
                 return;
 
-            var throttleDelayMs = CalculateThrottleDelay();
+            var workDuration = TimeSpan.FromSeconds((Stopwatch.GetTimestamp() - workStartTimestamp) / (double)Stopwatch.Frequency);
+            var throttleDelayMs = CalculateThrottleDelay(workDuration);
             if (throttleDelayMs > 0)
             {
                 if (_configuration.EnableDetailedLogging)
                 {
-                    var achievedRatio = _lastWorkDuration.TotalMilliseconds / (_lastWorkDuration.TotalMilliseconds + throttleDelayMs) * 100.0;
-                    _logger?.Debug($"[CpuThrottler] Work: {_lastWorkDuration.TotalMilliseconds:F0}ms, Delay: {throttleDelayMs}ms, Target: {_configuration.CpuUsageLimit}%, Achieved: {achievedRatio:F1}%");
+                    var achievedRatio = workDuration.TotalMilliseconds / (workDuration.TotalMilliseconds + throttleDelayMs) * 100.0;
+                    _logger?.Debug($"[CpuThrottler] Work: {workDuration.TotalMilliseconds:F0}ms, Delay: {throttleDelayMs}ms, Target: {_configuration.CpuUsageLimit}%, Achieved: {achievedRatio:F1}%");
                 }
 
                 try { await Task.Delay(throttleDelayMs, cancellationToken).ConfigureAwait(false); }
@@ -48,16 +45,16 @@ namespace EmbyCredits.Services.Utilities
             }
         }
 
-        private int CalculateThrottleDelay()
+        private int CalculateThrottleDelay(TimeSpan workDuration)
         {
             if (_configuration.CpuUsageLimit >= 100)
                 return 0;
 
             var cpuLimit = Math.Max(1, Math.Min(100, _configuration.CpuUsageLimit));
-            var workMs = _lastWorkDuration.TotalMilliseconds;
+            var workMs = workDuration.TotalMilliseconds;
             
             var targetIdleRatio = (100.0 - cpuLimit) / cpuLimit;
-            var delayMs = (int)(workMs * targetIdleRatio);
+            var delayMs = Math.Min((double)MaxThrottleDelayMs, workMs * targetIdleRatio);
             
             var baseThrottle = _configuration.CpuThrottleDelayMs;
             if (baseThrottle > 0)
@@ -65,7 +62,7 @@ namespace EmbyCredits.Services.Utilities
                 delayMs = Math.Max(delayMs, baseThrottle);
             }
 
-            return Math.Max(0, Math.Min(delayMs, 5000));
+            return (int)Math.Max(0, Math.Min(delayMs, MaxThrottleDelayMs));
         }
 
         public static void SetProcessPriority(Process process, PluginConfiguration configuration)
@@ -78,38 +75,32 @@ namespace EmbyCredits.Services.Utilities
 
             try
             {
-                if (!process.HasExited)
+                if (process.HasExited)
+                    return;
+
+                try
+                {
+                    process.PriorityClass = ProcessPriorityClass.BelowNormal;
+                    return;
+                }
+                catch (Exception)
                 {
                     if (IsWindows)
-                    {
-                        process.PriorityClass = ProcessPriorityClass.BelowNormal;
-                    }
-                    else if (IsLinux)
-                    {
-                        try
-                        {
-                            var processId = process.Id;
-                            var startInfo = new ProcessStartInfo
-                            {
-                                FileName = "/usr/bin/renice",
-                                Arguments = $"10 -p {processId}",
-                                UseShellExecute = false,
-                                RedirectStandardOutput = true,
-                                RedirectStandardError = true,
-                                CreateNoWindow = true
-                            };
-                            using (var reniceProcess = Process.Start(startInfo))
-                            {
-                                if (reniceProcess != null)
-                                {
-                                    reniceProcess.WaitForExit(1000);
-                                }
-                            }
-                        }
-                        catch
-                        {
-                        }
-                    }
+                        return;
+                }
+
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = "renice",
+                    Arguments = $"10 -p {process.Id}",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+                using (var reniceProcess = Process.Start(startInfo))
+                {
+                    reniceProcess?.WaitForExit(1000);
                 }
             }
             catch (Exception)

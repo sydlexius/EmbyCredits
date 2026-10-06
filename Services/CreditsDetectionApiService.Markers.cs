@@ -14,6 +14,9 @@ namespace EmbyCredits.Services
 {
     public partial class CreditsDetectionApiService
     {
+        private static readonly System.Reflection.PropertyInfo? _markerTypeProp =
+            typeof(ChapterInfo).GetProperty("MarkerType");
+
         public object Get(GetSeriesMarkersRequest request)
         {
             try
@@ -234,7 +237,10 @@ namespace EmbyCredits.Services
                     return new { Success = false, Message = "Chapter marker service not available" };
                 }
 
-                chapterMarkerService.SaveCreditsMarker(episode, actualCreditsStartSeconds);
+                if (!chapterMarkerService.TrySaveCreditsMarker(episode, actualCreditsStartSeconds, out var saveError))
+                {
+                    return new { Success = false, Message = saveError };
+                }
                 TryAutoBackupEpisode(episode, (long)(actualCreditsStartSeconds * TimeSpan.TicksPerSecond));
 
                 var timeDescription = request.IsRelativeFromEnd 
@@ -297,7 +303,7 @@ namespace EmbyCredits.Services
                 {
                     var markerType = GetMarkerTypeFromChapter(c);
                     return markerType == "CreditsStart" || markerType == "Credits" ||
-                           (c.Name != null && c.Name.ToLowerInvariant().Contains("credit"));
+                           (c.Name != null && !ChapterMarkerService.IsPostCreditsChapter(c) && c.Name.ToLowerInvariant().Contains("credit"));
                 });
 
                 if (creditsMarker == null)
@@ -390,7 +396,11 @@ namespace EmbyCredits.Services
                             continue;
                         }
 
-                        chapterMarkerService.SaveCreditsMarker(episode, episodeCreditsStartSeconds);
+                        if (!chapterMarkerService.TrySaveCreditsMarker(episode, episodeCreditsStartSeconds, out var saveError))
+                        {
+                            failedEpisodes.Add($"{episode.Name} ({saveError})");
+                            continue;
+                        }
                         TryAutoBackupEpisode(episode, (long)(episodeCreditsStartSeconds * TimeSpan.TicksPerSecond));
                         successCount++;
                         _logger?.Info($"Applied credits marker at {FormatTime(episodeCreditsStartSeconds)} (-{FormatTime(timeFromEnd)} from end) to {episode.Name}");
@@ -444,14 +454,9 @@ namespace EmbyCredits.Services
                 if (chapter == null)
                     return null;
 
-                var chapterType = chapter.GetType();
-                if (chapterType == null)
-                    return null;
-
-                var markerTypeProp = chapterType.GetProperty("MarkerType");
-                if (markerTypeProp != null && markerTypeProp.CanRead)
+                if (_markerTypeProp != null && _markerTypeProp.CanRead)
                 {
-                    var value = markerTypeProp.GetValue(chapter);
+                    var value = _markerTypeProp.GetValue(chapter);
                     return value?.ToString();
                 }
             }
@@ -491,7 +496,10 @@ namespace EmbyCredits.Services
                 var episodeInfo = $"{episode.Series?.Name} S{episode.ParentIndexNumber:00}E{episode.IndexNumber:00} - {episode.Name}";
                 _logger?.Info($"Manually adding timestamp from dry run: {episodeInfo} at {FormatTime(request.TimestampSeconds)}");
 
-                chapterMarkerService.SaveCreditsMarker(episode, request.TimestampSeconds);
+                if (!chapterMarkerService.TrySaveCreditsMarker(episode, request.TimestampSeconds, out var saveError))
+                {
+                    return new { Success = false, Message = saveError };
+                }
                 TryAutoBackupEpisode(episode, (long)(request.TimestampSeconds * TimeSpan.TicksPerSecond));
 
                 return new { 

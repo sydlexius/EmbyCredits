@@ -19,7 +19,7 @@ namespace EmbyCredits.Services
             if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
                 return false;
 
-            if (name.Contains("..") || name.Contains('/') || name.Contains('\\'))
+            if (name.Contains("..") || name.Contains("/") || name.Contains("\\"))
                 return false;
 
             return string.Equals(name, Path.GetFileName(name), StringComparison.Ordinal);

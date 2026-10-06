@@ -363,7 +363,11 @@ namespace EmbyCredits.Services
                             }
                         }
 
-                        chapterMarkerService.SaveCreditsMarker(episode, actualCreditsStartSeconds);
+                        if (!chapterMarkerService.TrySaveCreditsMarker(episode, actualCreditsStartSeconds, out var saveError))
+                        {
+                            failedEpisodes.Add($"{episode.Name} ({saveError})");
+                            continue;
+                        }
                         TryAutoBackupEpisode(episode, (long)(actualCreditsStartSeconds * TimeSpan.TicksPerSecond));
                         successCount++;
                         if (Plugin.Instance?.Configuration?.EnableDetailedLogging == true)
@@ -733,7 +737,7 @@ namespace EmbyCredits.Services
                 {
                     var episodeRequest = new ProcessEpisodeRequest
                     {
-                        ItemId = request.EpisodeId,
+                        ItemId = request.EpisodeId!,
                         SkipExistingMarkers = request.SkipExistingMarkers
                     };
                     return Post(episodeRequest);
@@ -742,7 +746,7 @@ namespace EmbyCredits.Services
                 {
                     var seasonRequest = new ProcessSeasonRequest
                     {
-                        SeriesId = request.SeriesId,
+                        SeriesId = request.SeriesId!,
                         SeasonNumber = request.SeasonNumber.Value,
                         SkipExistingMarkers = request.SkipExistingMarkers
                     };
@@ -752,7 +756,7 @@ namespace EmbyCredits.Services
                 {
                     var seriesRequest = new ProcessSeriesRequest
                     {
-                        SeriesId = request.SeriesId,
+                        SeriesId = request.SeriesId!,
                         SkipExistingMarkers = request.SkipExistingMarkers
                     };
                     return Post(seriesRequest);
@@ -761,7 +765,7 @@ namespace EmbyCredits.Services
                 {
                     var libraryRequest = new ProcessLibraryRequest
                     {
-                        LibraryId = request.LibraryId,
+                        LibraryId = request.LibraryId!,
                         SkipExistingMarkers = request.SkipExistingMarkers
                     };
                     return Post(libraryRequest);
@@ -965,7 +969,7 @@ namespace EmbyCredits.Services
                 }
                 else if (!string.IsNullOrEmpty(request.SeriesId))
                 {
-                    var series = ItemLookupHelper.ResolveSeries(_libraryManager, request.SeriesId, _logger);
+                    var series = ItemLookupHelper.ResolveSeries(_libraryManager, request.SeriesId!, _logger);
                     if (series != null)
                     {
                         var allEpisodes = ItemLookupHelper.GetSeriesEpisodes(_libraryManager, series.InternalId, _logger);

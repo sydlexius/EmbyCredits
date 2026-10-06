@@ -1,3 +1,4 @@
+using EmbyCredits.Services;
 using EmbyCredits.Services.Utilities;
 using MediaBrowser.Model.Logging;
 using System;
@@ -11,12 +12,11 @@ namespace EmbyCredits.Services.DetectionMethods
     {
         protected readonly ILogger Logger;
         protected readonly PluginConfiguration Configuration;
-        private static readonly AsyncLocal<string?> _lastError = new AsyncLocal<string?>();
-        private static readonly AsyncLocal<string?> _detectionReason = new AsyncLocal<string?>();
-        private static readonly AsyncLocal<int?> _activeFfmpegProcessId = new AsyncLocal<int?>();
+        private readonly AsyncLocal<string?> _lastError = new AsyncLocal<string?>();
+        private readonly AsyncLocal<string?> _detectionReason = new AsyncLocal<string?>();
+        private readonly AsyncLocal<int?> _activeFfmpegProcessId = new AsyncLocal<int?>();
         private bool _disposed = false;
 
-        // AsyncLocal so concurrently-processed episodes sharing this same detection method instance don't overwrite each other's state
         protected string LastError
         {
             get => _lastError.Value ?? string.Empty;
@@ -58,22 +58,39 @@ namespace EmbyCredits.Services.DetectionMethods
             return DetectionReason;
         }
 
+        protected bool IsDetailedLoggingActive => Configuration.EnableDetailedLogging || CreditsDetectionService.IsDebugMode;
+
         protected void LogInfo(string message)
         {
             if (Configuration.EnableDetailedLogging)
                 Logger.Info($"[{MethodName}] {message}");
+            if (CreditsDetectionService.IsDebugMode)
+                CreditsDetectionService.LogToDebug("INFO", $"[{MethodName}] {message}");
         }
 
         protected void LogDebug(string message)
         {
             if (Configuration.EnableDetailedLogging)
                 Logger.Debug($"[{MethodName}] {message}");
+            if (CreditsDetectionService.IsDebugMode)
+                CreditsDetectionService.LogToDebug("DEBUG", $"[{MethodName}] {message}");
+        }
+
+        protected void LogDebug(Func<string> messageFactory)
+        {
+            if (!IsDetailedLoggingActive) return;
+            var message = messageFactory();
+            if (Configuration.EnableDetailedLogging)
+                Logger.Debug($"[{MethodName}] {message}");
+            if (CreditsDetectionService.IsDebugMode)
+                CreditsDetectionService.LogToDebug("DEBUG", $"[{MethodName}] {message}");
         }
 
         protected void LogWarn(string message)
         {
-
             Logger.Warn($"[{MethodName}] {message}");
+            if (CreditsDetectionService.IsDebugMode)
+                CreditsDetectionService.LogToDebug("WARN", $"[{MethodName}] {message}");
         }
 
         protected void LogError(string message, Exception? ex = null)
@@ -82,6 +99,8 @@ namespace EmbyCredits.Services.DetectionMethods
                 Logger.ErrorException($"[{MethodName}] {message}", ex);
             else
                 Logger.Error($"[{MethodName}] {message}");
+            if (CreditsDetectionService.IsDebugMode)
+                CreditsDetectionService.LogToDebug("ERROR", ex != null ? $"[{MethodName}] {message}: {ex.Message}" : $"[{MethodName}] {message}");
         }
 
         protected string FormatTime(double seconds) => ItemLookupHelper.FormatTime(seconds);
@@ -103,7 +122,7 @@ namespace EmbyCredits.Services.DetectionMethods
                     var currentItem = Plugin.Progress.CurrentItem ?? "";
                     if (!currentItem.Contains(statusMessage))
                     {
-                        var baseItem = currentItem.Split(new[] { " - OCR:", " - Processing" }, StringSplitOptions.None)[0];
+                        var baseItem = currentItem.Split(new[] { " - OCR:", " - Processing", " - Chroma:" }, StringSplitOptions.None)[0];
                         Plugin.Progress.CurrentItem = $"{baseItem} - {statusMessage}";
                     }
                 }

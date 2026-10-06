@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -16,6 +17,7 @@ namespace EmbyCredits
         private int _successfulItems;
         private int _failedItems;
         private int _skippedItems;
+        private int _backupRestoredCount;
 
         public int TotalItems
         {
@@ -42,6 +44,11 @@ namespace EmbyCredits
             get => Volatile.Read(ref _skippedItems);
             set => Volatile.Write(ref _skippedItems, value);
         }
+        public int BackupRestoredCount
+        {
+            get => Volatile.Read(ref _backupRestoredCount);
+            set => Volatile.Write(ref _backupRestoredCount, value);
+        }
         public string CurrentItem { get; set; } = string.Empty;
         public int CurrentItemProgress { get; set; }
         public DateTime? StartTime { get; set; }
@@ -55,51 +62,51 @@ namespace EmbyCredits
         private readonly object _dictionariesLock = new object();
         private DateTime? _currentItemStartTime;
         
-        private Dictionary<string, string> _failureReasons = new Dictionary<string, string>();
-        private Dictionary<string, string> _successDetails = new Dictionary<string, string>();
-        private Dictionary<string, string> _skipReasons = new Dictionary<string, string>();
-        private Dictionary<string, double> _confidenceScores = new Dictionary<string, double>();
-        private Dictionary<string, string> _thumbnailPaths = new Dictionary<string, string>();
-        private Dictionary<string, string> _episodeIds = new Dictionary<string, string>();
-        private Dictionary<string, string> _appliedRules = new Dictionary<string, string>();
+        private ConcurrentDictionary<string, string> _failureReasons = new ConcurrentDictionary<string, string>();
+        private ConcurrentDictionary<string, string> _successDetails = new ConcurrentDictionary<string, string>();
+        private ConcurrentDictionary<string, string> _skipReasons = new ConcurrentDictionary<string, string>();
+        private ConcurrentDictionary<string, double> _confidenceScores = new ConcurrentDictionary<string, double>();
+        private ConcurrentDictionary<string, string> _thumbnailPaths = new ConcurrentDictionary<string, string>();
+        private ConcurrentDictionary<string, string> _episodeIds = new ConcurrentDictionary<string, string>();
+        private ConcurrentDictionary<string, string> _appliedRules = new ConcurrentDictionary<string, string>();
         
-        public Dictionary<string, string> FailureReasons 
+        public ConcurrentDictionary<string, string> FailureReasons 
         { 
             get => _failureReasons;
             set { lock (_dictionariesLock) { _failureReasons = value; } }
         }
         
-        public Dictionary<string, string> SuccessDetails 
+        public ConcurrentDictionary<string, string> SuccessDetails 
         { 
             get => _successDetails;
             set { lock (_dictionariesLock) { _successDetails = value; } }
         }
         
-        public Dictionary<string, string> SkipReasons 
+        public ConcurrentDictionary<string, string> SkipReasons 
         { 
             get => _skipReasons;
             set { lock (_dictionariesLock) { _skipReasons = value; } }
         }
         
-        public Dictionary<string, double> ConfidenceScores 
+        public ConcurrentDictionary<string, double> ConfidenceScores 
         { 
             get => _confidenceScores;
             set { lock (_dictionariesLock) { _confidenceScores = value; } }
         }
 
-        public Dictionary<string, string> ThumbnailPaths 
+        public ConcurrentDictionary<string, string> ThumbnailPaths 
         { 
             get => _thumbnailPaths;
             set { lock (_dictionariesLock) { _thumbnailPaths = value; } }
         }
 
-        public Dictionary<string, string> EpisodeIds 
+        public ConcurrentDictionary<string, string> EpisodeIds 
         { 
             get => _episodeIds;
             set { lock (_dictionariesLock) { _episodeIds = value; } }
         }
 
-        public Dictionary<string, string> AppliedRules 
+        public ConcurrentDictionary<string, string> AppliedRules 
         { 
             get => _appliedRules;
             set { lock (_dictionariesLock) { _appliedRules = value; } }
@@ -113,6 +120,7 @@ namespace EmbyCredits
             Volatile.Write(ref _successfulItems, 0);
             Volatile.Write(ref _failedItems, 0);
             Volatile.Write(ref _skippedItems, 0);
+            Volatile.Write(ref _backupRestoredCount, 0);
             CurrentItem = string.Empty;
             CurrentItemProgress = 0;
             StartTime = null;
@@ -136,7 +144,13 @@ namespace EmbyCredits
             _currentItemStartTime = DateTime.UtcNow;
         }
         
-        public void IncrementSkipped() => Interlocked.Increment(ref _skippedItems);
+        public void IncrementSkipped()
+        {
+            Interlocked.Increment(ref _skippedItems);
+            Interlocked.Increment(ref _processedItems);
+        }
+
+        public void IncrementBackupRestored() => Interlocked.Increment(ref _backupRestoredCount);
 
         public void CompleteProcessingItem(bool success)
         {
@@ -190,19 +204,12 @@ namespace EmbyCredits
             lock (_dictionariesLock)
             {
                 _failureReasons.Clear();
-                _failureReasons.TrimExcess();
                 _successDetails.Clear();
-                _successDetails.TrimExcess();
                 _skipReasons.Clear();
-                _skipReasons.TrimExcess();
                 _confidenceScores.Clear();
-                _confidenceScores.TrimExcess();
                 _thumbnailPaths.Clear();
-                _thumbnailPaths.TrimExcess();
                 _episodeIds.Clear();
-                _episodeIds.TrimExcess();
                 _appliedRules.Clear();
-                _appliedRules.TrimExcess();
             }
         }
         
@@ -216,28 +223,28 @@ namespace EmbyCredits
                 {
                     var toRemove = _failureReasons.Keys.Take(_failureReasons.Count - MaxDictionarySize).ToList();
                     foreach (var key in toRemove)
-                        _failureReasons.Remove(key);
+                        _failureReasons.TryRemove(key, out _);
                 }
 
                 if (_successDetails.Count > MaxDictionarySize)
                 {
                     var toRemove = _successDetails.Keys.Take(_successDetails.Count - MaxDictionarySize).ToList();
                     foreach (var key in toRemove)
-                        _successDetails.Remove(key);
+                        _successDetails.TryRemove(key, out _);
                 }
 
                 if (_skipReasons.Count > MaxDictionarySize)
                 {
                     var toRemove = _skipReasons.Keys.Take(_skipReasons.Count - MaxDictionarySize).ToList();
                     foreach (var key in toRemove)
-                        _skipReasons.Remove(key);
+                        _skipReasons.TryRemove(key, out _);
                 }
 
                 if (_confidenceScores.Count > MaxDictionarySize)
                 {
                     var toRemove = _confidenceScores.Keys.Take(_confidenceScores.Count - MaxDictionarySize).ToList();
                     foreach (var key in toRemove)
-                        _confidenceScores.Remove(key);
+                        _confidenceScores.TryRemove(key, out _);
                 }
 
                 if (_thumbnailPaths.Count > MaxDictionarySize)
@@ -248,7 +255,7 @@ namespace EmbyCredits
                     {
                         if (_thumbnailPaths.TryGetValue(key, out var thumbnailFile))
                             thumbnailFilesToDelete.Add(thumbnailFile);
-                        _thumbnailPaths.Remove(key);
+                        _thumbnailPaths.TryRemove(key, out _);
                     }
                 }
 
@@ -256,14 +263,14 @@ namespace EmbyCredits
                 {
                     var toRemove = _episodeIds.Keys.Take(_episodeIds.Count - MaxDictionarySize).ToList();
                     foreach (var key in toRemove)
-                        _episodeIds.Remove(key);
+                        _episodeIds.TryRemove(key, out _);
                 }
 
                 if (_appliedRules.Count > MaxDictionarySize)
                 {
                     var toRemove = _appliedRules.Keys.Take(_appliedRules.Count - MaxDictionarySize).ToList();
                     foreach (var key in toRemove)
-                        _appliedRules.Remove(key);
+                        _appliedRules.TryRemove(key, out _);
                 }
             }
 

@@ -62,6 +62,7 @@ define(['loading', 'toast'], function (loading, toast) {
 
         librariesContainer.innerHTML = '';
         const libraryIds = config.LibraryIds || [];
+        const allLibrariesEnabled = libraryIds.length === 0;
 
         ApiClient.getJSON(ApiClient.getUrl('Library/MediaFolders')).then(response => {
             const tvLibraries = response.Items.filter(library => {
@@ -74,7 +75,7 @@ define(['loading', 'toast'], function (loading, toast) {
                 div.className = 'checkboxContainer';
                 div.innerHTML = `
                     <label>
-                        <input is="emby-checkbox" type="checkbox" class="chkLibrary" data-library-id="${library.Id}" ${libraryIds.includes(library.Id) ? 'checked' : ''} />
+                        <input is="emby-checkbox" type="checkbox" class="chkLibrary" data-library-id="${library.Id}" ${allLibrariesEnabled || libraryIds.includes(library.Id) ? 'checked' : ''} />
                         <span>${library.Name}</span>
                     </label>
                 `;

@@ -9,7 +9,6 @@ using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Runtime.InteropServices;
-using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -23,7 +22,6 @@ namespace EmbyCredits.Services.DetectionMethods
     {
         public override string MethodName => "OCR Detection";
 
-        // AsyncLocal-backed so concurrently-processed episodes sharing this same detection method instance don't overwrite each other's per-run state
         private static readonly AsyncLocal<double?> _calculatedConfidenceState = new AsyncLocal<double?>();
         private double _calculatedConfidence
         {
@@ -95,14 +93,30 @@ namespace EmbyCredits.Services.DetectionMethods
 
         private static readonly Regex _multipleWhitespaceRegex = new Regex(@"\s{2,}", RegexOptions.Compiled);
 
-        private static readonly byte[] _jpegStartMarker = { 0xFF, 0xD8, 0xFF };
-        private static readonly byte[] _jpegEndMarker = { 0xFF, 0xD9 };
-
-        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string lower, string lowerCollapsed)[]> _normalizedKeywordsByString
-            = new System.Collections.Concurrent.ConcurrentDictionary<string, (string, string)[]>(StringComparer.Ordinal);
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, NormalizedKeyword[]> _normalizedKeywordsByString
+            = new System.Collections.Concurrent.ConcurrentDictionary<string, NormalizedKeyword[]>(StringComparer.Ordinal);
         private const int MaxNormalizedKeywordCacheEntries = 64;
+        private const int ShortKeywordLength = 4;
 
-        private (string lower, string lowerCollapsed)[] _normalizedKeywordCache = Array.Empty<(string, string)>();
+        private NormalizedKeyword[] _normalizedKeywordCache = Array.Empty<NormalizedKeyword>();
+
+        private readonly struct NormalizedKeyword
+        {
+            public NormalizedKeyword(string lower, string lowerCollapsed)
+            {
+                Lower = lower;
+                LowerCollapsed = lowerCollapsed;
+                RequireStartBoundary = UsesWordSeparatedScript(lower);
+                RequireEndBoundary = RequireStartBoundary && lower.Length <= ShortKeywordLength;
+                WordCount = lower.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries).Length;
+            }
+
+            public string Lower { get; }
+            public string LowerCollapsed { get; }
+            public bool RequireStartBoundary { get; }
+            public bool RequireEndBoundary { get; }
+            public int WordCount { get; }
+        }
 
         private static readonly DetectionTimestampCache _cache = new DetectionTimestampCache();
 
@@ -398,6 +412,12 @@ namespace EmbyCredits.Services.DetectionMethods
                         return result;
                     }
                 }
+                catch (OperationCanceledException)
+                {
+                    LastError = "OCR detection cancelled";
+                    LogInfo("OCR detection cancelled");
+                    return 0;
+                }
                 catch (Exception ex)
                 {
                     LastError = $"OCR detection error: {ex.Message}";
@@ -419,6 +439,12 @@ namespace EmbyCredits.Services.DetectionMethods
                         }
                     }
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                LastError = "OCR detection cancelled";
+                LogInfo("OCR detection cancelled");
+                return 0;
             }
             catch (Exception ex)
             {
@@ -491,6 +517,9 @@ namespace EmbyCredits.Services.DetectionMethods
                     frameIndicatesCredits = matchedKeywords.Count > 0 || scrollingDetected || structureDetected;
                 }
 
+                if (matchedKeywords.Count > 0)
+                    _totalKeywordMatches += matchedKeywords.Count;
+
                 if (frameIndicatesCredits)
                 {
                     var matchReasons = new List<string>();
@@ -528,10 +557,10 @@ namespace EmbyCredits.Services.DetectionMethods
             var normalizedVideoPath = FFmpegHelper.ResolveInputPath(videoPath);
             var preInputArgs = BuildPreInputArgs(videoPath);
             var threadArgs = BuildThreadArgs();
-            var filterChain = BuildFilterChain(fps);
-            
+            var filterChain = BuildFilterChain(fps, videoPath);
+
             var vcodec = "mjpeg";
-            var codecArgs = $"-q:v {Configuration.OcrJpegQuality}";
+            var codecArgs = $"-q:v {FFmpegHelper.ToMjpegQScale(Configuration.OcrJpegQuality)}";
 
             UpdateProgress(10, "Starting direct memory frame extraction");
 
@@ -545,35 +574,39 @@ namespace EmbyCredits.Services.DetectionMethods
                 StandardOutputEncoding = null
             };
             AddTokenizedArgs(ocrMemStartInfo, preInputArgs);
-            ocrMemStartInfo.ArgumentList.Add("-ss");
-            ocrMemStartInfo.ArgumentList.Add(startTime.ToString(CultureInfo.InvariantCulture));
-            ocrMemStartInfo.ArgumentList.Add("-i");
-            ocrMemStartInfo.ArgumentList.Add(normalizedVideoPath);
+            ocrMemStartInfo.ArgumentList().Add("-ss");
+            ocrMemStartInfo.ArgumentList().Add(startTime.ToString(CultureInfo.InvariantCulture));
+            FFmpegHelper.AddStrmNetworkResilienceArgs(ocrMemStartInfo, videoPath, normalizedVideoPath, Configuration);
+            ocrMemStartInfo.ArgumentList().Add("-i");
+            ocrMemStartInfo.ArgumentList().Add(normalizedVideoPath);
             AddTokenizedArgs(ocrMemStartInfo, threadArgs);
-            ocrMemStartInfo.ArgumentList.Add("-t");
-            ocrMemStartInfo.ArgumentList.Add(analysisDuration.ToString(CultureInfo.InvariantCulture));
-            ocrMemStartInfo.ArgumentList.Add("-vf");
-            ocrMemStartInfo.ArgumentList.Add(filterChain);
-            ocrMemStartInfo.ArgumentList.Add("-f");
-            ocrMemStartInfo.ArgumentList.Add("image2pipe");
-            ocrMemStartInfo.ArgumentList.Add("-vcodec");
-            ocrMemStartInfo.ArgumentList.Add(vcodec);
+            ocrMemStartInfo.ArgumentList().Add("-t");
+            ocrMemStartInfo.ArgumentList().Add(analysisDuration.ToString(CultureInfo.InvariantCulture));
+            ocrMemStartInfo.ArgumentList().Add("-vf");
+            ocrMemStartInfo.ArgumentList().Add(filterChain);
+            ocrMemStartInfo.ArgumentList().Add("-f");
+            ocrMemStartInfo.ArgumentList().Add("image2pipe");
+            ocrMemStartInfo.ArgumentList().Add("-vcodec");
+            ocrMemStartInfo.ArgumentList().Add(vcodec);
             AddTokenizedArgs(ocrMemStartInfo, codecArgs);
-            ocrMemStartInfo.ArgumentList.Add("pipe:1");
+            ocrMemStartInfo.ArgumentList().Add("pipe:1");
 
             using (var process = new Process { StartInfo = ocrMemStartInfo })
             {
                 try
                 {
+                    ocrMemStartInfo.ApplyArgumentList();
                     process.Start();
                     Utilities.FFmpegHelper.RegisterProcess(process, $"OCR Memory: {System.IO.Path.GetFileName(videoPath)}");
                     ActiveFfmpegProcessId = process.Id;
                     Utilities.CpuThrottler.SetProcessPriority(process, Configuration);
 
-                    var timeoutMinutes = Configuration.OcrMaxAnalysisDuration > 0 
+                    var defaultTimeoutMinutes = Configuration.OcrMaxAnalysisDuration > 0 
                     ? (Configuration.OcrMaxAnalysisDuration / 60) + 5
                     : 30;
-                using var timeoutCts = new CancellationTokenSource(TimeSpan.FromMinutes(timeoutMinutes));
+                var resolvedTimeout = Utilities.FFmpegHelper.ResolveOperationTimeout(Configuration, defaultTimeoutMinutes);
+                var timeoutMinutes = resolvedTimeout?.TotalMinutes ?? 0;
+                using var timeoutCts = new CancellationTokenSource(resolvedTimeout ?? Timeout.InfiniteTimeSpan);
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
                 var effectiveToken = linkedCts.Token;
 
@@ -593,9 +626,9 @@ namespace EmbyCredits.Services.DetectionMethods
                             if (!string.IsNullOrWhiteSpace(ffmpegError))
                             {
                                 if (CreditsDetectionService.IsDebugMode)
-                                    CreditsDetectionService.LogToDebug("DEBUG", $"[OCR Detection] FFmpeg stderr: {ffmpegError}");
-                                else if (ffmpegError.Contains("error", StringComparison.OrdinalIgnoreCase) ||
-                                         ffmpegError.Contains("invalid", StringComparison.OrdinalIgnoreCase))
+                                    CreditsDetectionService.LogToDebug("DEBUG", $"[OCR Detection] FFmpeg stderr: {Utilities.FFmpegHelper.RemoveRepetitiveFfmpegNoise(ffmpegError)}");
+                                else if (ffmpegError.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                         ffmpegError.IndexOf("invalid", StringComparison.OrdinalIgnoreCase) >= 0)
                                     LogDebug($"FFmpeg output: {ffmpegError}");
                             }
                             return ffmpegError;
@@ -608,87 +641,32 @@ namespace EmbyCredits.Services.DetectionMethods
                     }
                 });
 
-                List<byte>? buffer = null;
+                JpegFrameSplitter? splitter = null;
                 List<(byte[] data, double timestamp, int index)>? frameQueue = null;
                 byte[]? readBuffer = null;
 
                 try
                 {
                     var stdoutStream = process.StandardOutput.BaseStream;
-                    
-                    buffer = new List<byte>();
+
+                    const int MaxBufferSize = 20 * 1024 * 1024;
+                    splitter = new JpegFrameSplitter(MaxBufferSize);
                     readBuffer = ArrayPool<byte>.Shared.Rent(65536);
                     frameQueue = new List<(byte[] data, double timestamp, int index)>();
                     var batchSize = Configuration.OcrEnableParallelProcessing ? Configuration.OcrParallelBatchSize : 1;
-                    const int MaxBufferSize = 20 * 1024 * 1024;
-                    
-                    while (!effectiveToken.IsCancellationRequested && frameIndex < maxFramesToProcess)
+                    var endOfStream = false;
+
+                    while (!endOfStream && !effectiveToken.IsCancellationRequested && frameIndex < maxFramesToProcess)
                     {
                         int bytesRead = await stdoutStream.ReadAsync(readBuffer, 0, 65536, effectiveToken).ConfigureAwait(false);
-                        
+
                         if (bytesRead == 0)
+                            endOfStream = true;
+                        else
+                            splitter.Append(readBuffer, bytesRead);
+
+                        while (!effectiveToken.IsCancellationRequested && frameIndex < maxFramesToProcess && splitter.TryReadFrame(out var frameData))
                         {
-                            if (buffer.Count > 0)
-                            {
-                                int imageStart = FindSequence(buffer, _jpegStartMarker, 0);
-                                if (imageStart >= 0)
-                                {
-                                    int endMarker = FindSequence(buffer, _jpegEndMarker, imageStart);
-                                    if (endMarker >= 0)
-                                    {
-                                        var frameData = buffer.GetRange(imageStart, endMarker + _jpegEndMarker.Length - imageStart).ToArray();
-                                        var timestamp = startTime + (frameIndex / fps);
-                                        frameQueue.Add((frameData, timestamp, frameIndex));
-                                        frameIndex++;
-                                    }
-                                }
-                            }
-                            
-                            if (frameQueue.Count > 0)
-                            {
-                                await ProcessFrameBatch(frameQueue, keywords, detectionScores, characterDensityHistory, 
-                                    recentTextFrames, analysisDuration, fps, maxFramesToProcess, effectiveToken).ConfigureAwait(false);
-                                frameQueue.Clear();
-                            }
-                            break;
-                        }
-
-                        buffer.AddRange(new ArraySegment<byte>(readBuffer, 0, bytesRead));
-
-                        while (buffer.Count > _jpegStartMarker.Length && !effectiveToken.IsCancellationRequested && frameIndex < maxFramesToProcess)
-                        {
-                            int imageStart = FindSequence(buffer, _jpegStartMarker, 0);
-                            if (imageStart == -1)
-                            {
-                                if (buffer.Count > _jpegStartMarker.Length)
-                                {
-                                    buffer.RemoveRange(0, buffer.Count - _jpegStartMarker.Length);
-                                }
-                                break;
-                            }
-
-                            if (imageStart > 0)
-                            {
-                                buffer.RemoveRange(0, imageStart);
-                                imageStart = 0;
-                            }
-
-                            int endMarker = FindSequence(buffer, _jpegEndMarker, imageStart + _jpegStartMarker.Length);
-                            
-                            if (endMarker == -1)
-                            {
-                                if (buffer.Count > MaxBufferSize)
-                                {
-                                    LogWarn($"Frame buffer exceeded {MaxBufferSize / (1024 * 1024)}MB, clearing to prevent memory leak");
-                                    buffer.Clear();
-                                }
-                                break;
-                            }
-
-                            var frameLength = endMarker + _jpegEndMarker.Length - imageStart;
-                            var frameData = buffer.GetRange(imageStart, frameLength).ToArray();
-                            buffer.RemoveRange(0, imageStart + frameLength);
-
                             if (frameData.Length < 1024)
                             {
                                 frameIndex++;
@@ -701,24 +679,27 @@ namespace EmbyCredits.Services.DetectionMethods
 
                             if (frameQueue.Count >= batchSize)
                             {
-                                await ProcessFrameBatch(frameQueue, keywords, detectionScores, characterDensityHistory, 
+                                await ProcessFrameBatch(frameQueue, keywords, detectionScores, characterDensityHistory,
                                     recentTextFrames, analysisDuration, fps, maxFramesToProcess, effectiveToken).ConfigureAwait(false);
                                 frameQueue.Clear();
-
-                                if (frameIndex % 200 == 0 && buffer.Capacity > 1024 * 1024)
-                                {
-                                    buffer.TrimExcess();
-                                }
                             }
+                        }
+
+                        if (splitter.DiscardedOversizedData)
+                        {
+                            LogWarn($"Frame buffer exceeded {MaxBufferSize / (1024 * 1024)}MB, clearing to prevent memory leak");
+                            splitter.ResetDiscardedFlag();
                         }
                     }
 
-                    if (buffer != null)
+                    if (frameQueue.Count > 0 && !effectiveToken.IsCancellationRequested)
                     {
-                        buffer.Clear();
-                        buffer.TrimExcess();
+                        await ProcessFrameBatch(frameQueue, keywords, detectionScores, characterDensityHistory,
+                            recentTextFrames, analysisDuration, fps, maxFramesToProcess, effectiveToken).ConfigureAwait(false);
+                        frameQueue.Clear();
                     }
-                    buffer = null;
+
+                    splitter = null;
                     if (readBuffer != null)
                     {
                         ArrayPool<byte>.Shared.Return(readBuffer);
@@ -730,7 +711,7 @@ namespace EmbyCredits.Services.DetectionMethods
                         frameQueue.TrimExcess();
                     }
                     frameQueue = null;
-                    
+
                     if (!process.HasExited)
                     {
                         try
@@ -745,6 +726,11 @@ namespace EmbyCredits.Services.DetectionMethods
                     }
 
                     await ffmpegErrorTask.ConfigureAwait(false);
+                    var memPipelineStderr = ffmpegErrorTask.Result;
+                    if (timeoutCts.IsCancellationRequested && !string.IsNullOrWhiteSpace(memPipelineStderr))
+                    {
+                        LogWarn($"FFmpeg timed out after {timeoutMinutes:F1} min - stderr: {memPipelineStderr}");
+                    }
                     if (process.HasExited && process.ExitCode != 0)
                     {
                         var hwType = Configuration.OcrEnableHardwareAcceleration && !string.IsNullOrWhiteSpace(Configuration.OcrHardwareAccelerationType) && Configuration.OcrHardwareAccelerationType != "none"
@@ -758,13 +744,8 @@ namespace EmbyCredits.Services.DetectionMethods
                 catch (OperationCanceledException)
                 {
                     LogInfo("Frame extraction cancelled");
-                    
-                    if (buffer != null)
-                    {
-                        buffer.Clear();
-                        buffer.TrimExcess();
-                        buffer = null;
-                    }
+
+                    splitter = null;
                     if (readBuffer != null)
                     {
                         ArrayPool<byte>.Shared.Return(readBuffer);
@@ -1074,7 +1055,7 @@ namespace EmbyCredits.Services.DetectionMethods
             var normalizedPath = FFmpegHelper.ResolveInputPath(videoPath);
             var preInputArgs = BuildPreInputArgs(videoPath);
             var threadArgs = BuildThreadArgs();
-            var filterChain = BuildFilterChain(coarseFps);
+            var filterChain = BuildFilterChain(coarseFps, videoPath);
 
             var startInfo = new ProcessStartInfo
             {
@@ -1086,32 +1067,36 @@ namespace EmbyCredits.Services.DetectionMethods
                 StandardOutputEncoding = null
             };
             AddTokenizedArgs(startInfo, preInputArgs);
-            startInfo.ArgumentList.Add("-ss");
-            startInfo.ArgumentList.Add(startTime.ToString(CultureInfo.InvariantCulture));
-            startInfo.ArgumentList.Add("-i");
-            startInfo.ArgumentList.Add(normalizedPath);
+            startInfo.ArgumentList().Add("-ss");
+            startInfo.ArgumentList().Add(startTime.ToString(CultureInfo.InvariantCulture));
+            FFmpegHelper.AddStrmNetworkResilienceArgs(startInfo, videoPath, normalizedPath, Configuration);
+            startInfo.ArgumentList().Add("-i");
+            startInfo.ArgumentList().Add(normalizedPath);
             AddTokenizedArgs(startInfo, threadArgs);
-            startInfo.ArgumentList.Add("-t");
-            startInfo.ArgumentList.Add(analysisDuration.ToString(CultureInfo.InvariantCulture));
-            startInfo.ArgumentList.Add("-vf");
-            startInfo.ArgumentList.Add(filterChain);
-            startInfo.ArgumentList.Add("-f");
-            startInfo.ArgumentList.Add("image2pipe");
-            startInfo.ArgumentList.Add("-vcodec");
-            startInfo.ArgumentList.Add("mjpeg");
-            AddTokenizedArgs(startInfo, $"-q:v {Configuration.OcrJpegQuality}");
-            startInfo.ArgumentList.Add("pipe:1");
+            startInfo.ArgumentList().Add("-t");
+            startInfo.ArgumentList().Add(analysisDuration.ToString(CultureInfo.InvariantCulture));
+            startInfo.ArgumentList().Add("-vf");
+            startInfo.ArgumentList().Add(filterChain);
+            startInfo.ArgumentList().Add("-f");
+            startInfo.ArgumentList().Add("image2pipe");
+            startInfo.ArgumentList().Add("-vcodec");
+            startInfo.ArgumentList().Add("mjpeg");
+            AddTokenizedArgs(startInfo, $"-q:v {FFmpegHelper.ToMjpegQScale(Configuration.OcrJpegQuality)}");
+            startInfo.ArgumentList().Add("pipe:1");
 
             using var process = new Process { StartInfo = startInfo };
             try
             {
+                startInfo.ApplyArgumentList();
                 process.Start();
                 Utilities.FFmpegHelper.RegisterProcess(process, $"OCR Coarse: {System.IO.Path.GetFileName(videoPath)}");
                 ActiveFfmpegProcessId = process.Id;
                 Utilities.CpuThrottler.SetProcessPriority(process, Configuration);
 
-                var timeoutMinutes = (analysisDuration / 60) + 5;
-                using var timeoutCts = new CancellationTokenSource(TimeSpan.FromMinutes(timeoutMinutes));
+                var defaultTimeoutMinutes = (analysisDuration / 60) + 5;
+                var resolvedTimeout = Utilities.FFmpegHelper.ResolveOperationTimeout(Configuration, defaultTimeoutMinutes);
+                var timeoutMinutes = resolvedTimeout?.TotalMinutes ?? 0;
+                using var timeoutCts = new CancellationTokenSource(resolvedTimeout ?? Timeout.InfiniteTimeSpan);
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
                 var token = linkedCts.Token;
 
@@ -1123,71 +1108,36 @@ namespace EmbyCredits.Services.DetectionMethods
                         if (!string.IsNullOrWhiteSpace(ffmpegError))
                         {
                             if (CreditsDetectionService.IsDebugMode)
-                                CreditsDetectionService.LogToDebug("DEBUG", $"[OCR Detection] FFmpeg coarse scan stderr: {ffmpegError}");
-                            else if (ffmpegError.Contains("error", StringComparison.OrdinalIgnoreCase) ||
-                                     ffmpegError.Contains("invalid", StringComparison.OrdinalIgnoreCase))
+                                CreditsDetectionService.LogToDebug("DEBUG", $"[OCR Detection] FFmpeg coarse scan stderr: {Utilities.FFmpegHelper.RemoveRepetitiveFfmpegNoise(ffmpegError)}");
+                            else if (ffmpegError.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                     ffmpegError.IndexOf("invalid", StringComparison.OrdinalIgnoreCase) >= 0)
                                 LogDebug($"FFmpeg coarse scan output: {ffmpegError}");
                         }
+                        return ffmpegError;
                     }
-                    catch { }
+                    catch { return string.Empty; }
                 });
 
-                var buffer = new List<byte>();
+                var splitter = new JpegFrameSplitter(20 * 1024 * 1024);
                 var readBuffer = ArrayPool<byte>.Shared.Rent(65536);
                 int frameIndex = 0;
 
                 try
                 {
                     var stdoutStream = process.StandardOutput.BaseStream;
+                    var endOfStream = false;
 
-                    while (!token.IsCancellationRequested)
+                    while (!endOfStream && !token.IsCancellationRequested)
                     {
                         int bytesRead = await stdoutStream.ReadAsync(readBuffer, 0, 65536, token).ConfigureAwait(false);
 
                         if (bytesRead == 0)
+                            endOfStream = true;
+                        else
+                            splitter.Append(readBuffer, bytesRead);
+
+                        while (!token.IsCancellationRequested && splitter.TryReadFrame(out var frameData))
                         {
-                            if (buffer.Count > 0)
-                            {
-                                int s = FindSequence(buffer, _jpegStartMarker, 0);
-                                if (s >= 0)
-                                {
-                                    int e = FindSequence(buffer, _jpegEndMarker, s);
-                                    if (e >= 0)
-                                    {
-                                        var fd = buffer.GetRange(s, e + _jpegEndMarker.Length - s).ToArray();
-                                        var ts = startTime + (frameIndex / coarseFps);
-                                        pendingBatch.Add((fd, ts));
-                                        frameIndex++;
-                                    }
-                                }
-                            }
-                            break;
-                        }
-
-                        buffer.AddRange(new ArraySegment<byte>(readBuffer, 0, bytesRead));
-
-                        while (!token.IsCancellationRequested)
-                        {
-                            int s = FindSequence(buffer, _jpegStartMarker, 0);
-                            if (s == -1)
-                            {
-                                if (buffer.Count > _jpegStartMarker.Length)
-                                    buffer.RemoveRange(0, buffer.Count - _jpegStartMarker.Length);
-                                break;
-                            }
-                            if (s > 0) { buffer.RemoveRange(0, s); s = 0; }
-
-                            int e = FindSequence(buffer, _jpegEndMarker, s + _jpegStartMarker.Length);
-                            if (e == -1)
-                            {
-                                if (buffer.Count > 20 * 1024 * 1024) buffer.Clear();
-                                break;
-                            }
-
-                            var frameLength = e + _jpegEndMarker.Length - s;
-                            var frameData = buffer.GetRange(s, frameLength).ToArray();
-                            buffer.RemoveRange(0, s + frameLength);
-
                             if (frameData.Length >= 1024)
                             {
                                 var timestamp = startTime + (frameIndex / coarseFps);
@@ -1208,15 +1158,17 @@ namespace EmbyCredits.Services.DetectionMethods
                 }
                 finally
                 {
-                    buffer.Clear();
-                    buffer.TrimExcess();
                     ArrayPool<byte>.Shared.Return(readBuffer);
 
                     if (!process.HasExited)
                     {
                         try { process.Kill(); } catch { }
                     }
-                    await stderrTask.ConfigureAwait(false);
+                    var coarseStderr = await stderrTask.ConfigureAwait(false);
+                    if (timeoutCts.IsCancellationRequested && !string.IsNullOrWhiteSpace(coarseStderr))
+                    {
+                        LogWarn($"FFmpeg coarse scan timed out after {timeoutMinutes:F1} min - stderr: {coarseStderr}");
+                    }
                     if (process.HasExited && process.ExitCode != 0)
                     {
                         var hwType = Configuration.OcrEnableHardwareAcceleration && !string.IsNullOrWhiteSpace(Configuration.OcrHardwareAccelerationType) && Configuration.OcrHardwareAccelerationType != "none"
@@ -1333,9 +1285,7 @@ namespace EmbyCredits.Services.DetectionMethods
             {
                 var imageExtension = "jpg";
 
-                var userQuality = Math.Max(1, Math.Min(100, Configuration.OcrJpegQuality));
-                var ffmpegQuality = 2 + (int)Math.Round((100 - userQuality) * 29.0 / 99.0);
-                var qualityParam = $"-q:v {ffmpegQuality}";
+                var qualityParam = $"-q:v {FFmpegHelper.ToMjpegQScale(Configuration.OcrJpegQuality)}";
 
                 var frameOutputPath = $"{tempDir.Replace("\\", "/")}/frame_%04d.{imageExtension}";
 
@@ -1346,7 +1296,7 @@ namespace EmbyCredits.Services.DetectionMethods
 
                 var preInputArgs = BuildPreInputArgs(videoPath);
                 var threadArgs = BuildThreadArgs();
-                var filterChain = BuildFilterChain(fps);
+                var filterChain = BuildFilterChain(fps, videoPath);
 
                 LogDebug($"Extracting frames from {FormatTime(startTime)} at {fps} fps (JPG Q{Configuration.OcrJpegQuality}) for OCR analysis");
                 LogDebug($"FFmpeg command: {FFmpegHelper.GetFfmpegPath()} -ss {startTime} -i <path> -t {analysisDuration} -vf ...");
@@ -1361,22 +1311,24 @@ namespace EmbyCredits.Services.DetectionMethods
                     CreateNoWindow = true
                 };
                 AddTokenizedArgs(ocrDiskStartInfo, preInputArgs);
-                ocrDiskStartInfo.ArgumentList.Add("-ss");
-                ocrDiskStartInfo.ArgumentList.Add(startTime.ToString(CultureInfo.InvariantCulture));
-                ocrDiskStartInfo.ArgumentList.Add("-i");
-                ocrDiskStartInfo.ArgumentList.Add(normalizedVideoPathDisk);
+                ocrDiskStartInfo.ArgumentList().Add("-ss");
+                ocrDiskStartInfo.ArgumentList().Add(startTime.ToString(CultureInfo.InvariantCulture));
+                FFmpegHelper.AddStrmNetworkResilienceArgs(ocrDiskStartInfo, videoPath, normalizedVideoPathDisk, Configuration);
+                ocrDiskStartInfo.ArgumentList().Add("-i");
+                ocrDiskStartInfo.ArgumentList().Add(normalizedVideoPathDisk);
                 AddTokenizedArgs(ocrDiskStartInfo, threadArgs);
-                ocrDiskStartInfo.ArgumentList.Add("-t");
-                ocrDiskStartInfo.ArgumentList.Add(analysisDuration.ToString(CultureInfo.InvariantCulture));
-                ocrDiskStartInfo.ArgumentList.Add("-vf");
-                ocrDiskStartInfo.ArgumentList.Add(filterChain);
+                ocrDiskStartInfo.ArgumentList().Add("-t");
+                ocrDiskStartInfo.ArgumentList().Add(analysisDuration.ToString(CultureInfo.InvariantCulture));
+                ocrDiskStartInfo.ArgumentList().Add("-vf");
+                ocrDiskStartInfo.ArgumentList().Add(filterChain);
                 AddTokenizedArgs(ocrDiskStartInfo, qualityParam);
-                ocrDiskStartInfo.ArgumentList.Add("-f");
-                ocrDiskStartInfo.ArgumentList.Add("image2");
-                ocrDiskStartInfo.ArgumentList.Add(ffmpegFramePath);
+                ocrDiskStartInfo.ArgumentList().Add("-f");
+                ocrDiskStartInfo.ArgumentList().Add("image2");
+                ocrDiskStartInfo.ArgumentList().Add(ffmpegFramePath);
 
                 using (var process = new Process { StartInfo = ocrDiskStartInfo })
                 {
+                    ocrDiskStartInfo.ApplyArgumentList();
                     process.Start();
                     Utilities.FFmpegHelper.RegisterProcess(process, $"OCR Disk: {System.IO.Path.GetFileName(videoPath)}");
                     ActiveFfmpegProcessId = process.Id;
@@ -1384,10 +1336,12 @@ namespace EmbyCredits.Services.DetectionMethods
                     {
                     Utilities.CpuThrottler.SetProcessPriority(process, Configuration);
 
-                    var timeoutMinutes = Configuration.OcrMaxAnalysisDuration > 0 
+                    var defaultTimeoutMinutes = Configuration.OcrMaxAnalysisDuration > 0 
                         ? (Configuration.OcrMaxAnalysisDuration / 60) + 5
                         : 30;
-                    using var timeoutCts = new CancellationTokenSource(TimeSpan.FromMinutes(timeoutMinutes));
+                    var resolvedTimeout = Utilities.FFmpegHelper.ResolveOperationTimeout(Configuration, defaultTimeoutMinutes);
+                    var timeoutMinutes = resolvedTimeout?.TotalMinutes ?? 0;
+                    using var timeoutCts = new CancellationTokenSource(resolvedTimeout ?? Timeout.InfiniteTimeSpan);
                     using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
                     var effectiveToken = linkedCts.Token;
 
@@ -1409,9 +1363,9 @@ namespace EmbyCredits.Services.DetectionMethods
                                 if (!string.IsNullOrWhiteSpace(ffmpegError))
                                 {
                                     if (CreditsDetectionService.IsDebugMode)
-                                        CreditsDetectionService.LogToDebug("DEBUG", $"[OCR Detection] FFmpeg disk pipeline stderr: {ffmpegError}");
-                                    else if (ffmpegError.Contains("error", StringComparison.OrdinalIgnoreCase) ||
-                                             ffmpegError.Contains("invalid", StringComparison.OrdinalIgnoreCase))
+                                        CreditsDetectionService.LogToDebug("DEBUG", $"[OCR Detection] FFmpeg disk pipeline stderr: {Utilities.FFmpegHelper.RemoveRepetitiveFfmpegNoise(ffmpegError)}");
+                                    else if (ffmpegError.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                             ffmpegError.IndexOf("invalid", StringComparison.OrdinalIgnoreCase) >= 0)
                                         LogDebug($"FFmpeg output: {ffmpegError}");
                                 }
                                 return ffmpegError;
@@ -1546,9 +1500,12 @@ namespace EmbyCredits.Services.DetectionMethods
                                         var charCount = CountMeaningfulCharacters(ocrText);
                                         characterDensityHistory.Add((timestamp, charCount));
 
-                                        var textPreview = ocrText.Length > 100 ? ocrText.Substring(0, 100) + "..." : ocrText;
-                                        var textOneLine = textPreview.Replace("\n", " ").Replace("\r", "");
-                                        LogDebug($"Frame at {FormatTime(timestamp)}: OCR detected {charCount} chars: \"{textOneLine}\"");
+                                        LogDebug(() =>
+                                        {
+                                            var textPreview = ocrText.Length > 100 ? ocrText.Substring(0, 100) + "..." : ocrText;
+                                            var textOneLine = textPreview.Replace("\n", " ").Replace("\r", "");
+                                            return $"Frame at {FormatTime(timestamp)}: OCR detected {charCount} chars: \"{textOneLine}\"";
+                                        });
 
                                         var matchedKeywords = FindKeywordMatches(ocrText, keywords);
 
@@ -1565,8 +1522,11 @@ namespace EmbyCredits.Services.DetectionMethods
                                             frameIndicatesCredits = densityDetected || matchedKeywords.Count > 0;
                                             if (densityDetected)
                                             {
-                                                var keywordBonus = matchedKeywords.Count > 0 ? $" + {matchedKeywords.Count} keyword(s): {string.Join(", ", matchedKeywords)}" : "";
-                                                LogDebug($"Frame at {FormatTime(timestamp)}: ✓ MATCH - High text density ({charCount} chars){keywordBonus}");
+                                                LogDebug(() =>
+                                                {
+                                                    var keywordBonus = matchedKeywords.Count > 0 ? $" + {matchedKeywords.Count} keyword(s): {string.Join(", ", matchedKeywords)}" : "";
+                                                    return $"Frame at {FormatTime(timestamp)}: ✓ MATCH - High text density ({charCount} chars){keywordBonus}";
+                                                });
                                             }
                                         }
                                         else
@@ -1589,7 +1549,7 @@ namespace EmbyCredits.Services.DetectionMethods
 
                                             if (matchedKeywords.Count > 0 && !densityDetected)
                                             {
-                                                LogDebug($"Frame at {FormatTime(timestamp)}: ✓ MATCH - Found {matchedKeywords.Count} keyword(s): {string.Join(", ", matchedKeywords)}");
+                                                LogDebug(() => $"Frame at {FormatTime(timestamp)}: ✓ MATCH - Found {matchedKeywords.Count} keyword(s): {string.Join(", ", matchedKeywords)}");
                                             }
                                         }
                                         else
@@ -1744,7 +1704,7 @@ namespace EmbyCredits.Services.DetectionMethods
                                         }
                                     }
 
-                                    LogDebug($"Sending frame {frameIndex + 1} to OCR API: {frameFile}");
+                                    LogDebug(() => $"Sending frame {frameIndex + 1} to OCR API: {frameFile}");
                                     var (ocrText, ocrConfidence) = await PerformOcr(frameFile, effectiveToken).ConfigureAwait(false);
                                     
                                     if (ocrConfidence > 0)
@@ -1752,16 +1712,19 @@ namespace EmbyCredits.Services.DetectionMethods
                                         _ocrTextConfidences.Add(ocrConfidence);
                                     }
                                     
-                                    LogDebug($"OCR response for frame {frameIndex + 1}: {(string.IsNullOrWhiteSpace(ocrText) ? "empty" : $"{ocrText.Length} chars")}");;
+                                    LogDebug(() => $"OCR response for frame {frameIndex + 1}: {(string.IsNullOrWhiteSpace(ocrText) ? "empty" : $"{ocrText.Length} chars")}");
 
                                     if (!string.IsNullOrWhiteSpace(ocrText))
                                     {
                                         var charCount = CountMeaningfulCharacters(ocrText);
                                         characterDensityHistory.Add((timestamp, charCount));
 
-                                        var textPreview = ocrText.Length > 100 ? ocrText.Substring(0, 100) + "..." : ocrText;
-                                        var textOneLine = textPreview.Replace("\n", " ").Replace("\r", "");
-                                        LogDebug($"Frame at {FormatTime(timestamp)}: OCR detected {charCount} chars: \"{textOneLine}\"");
+                                        LogDebug(() =>
+                                        {
+                                            var textPreview = ocrText.Length > 100 ? ocrText.Substring(0, 100) + "..." : ocrText;
+                                            var textOneLine = textPreview.Replace("\n", " ").Replace("\r", "");
+                                            return $"Frame at {FormatTime(timestamp)}: OCR detected {charCount} chars: \"{textOneLine}\"";
+                                        });
 
                                         var matchedKeywords = FindKeywordMatches(ocrText, keywords);
 
@@ -1778,8 +1741,11 @@ namespace EmbyCredits.Services.DetectionMethods
                                             frameIndicatesCredits = densityDetected || matchedKeywords.Count > 0;
                                             if (densityDetected)
                                             {
-                                                var keywordBonus = matchedKeywords.Count > 0 ? $" + {matchedKeywords.Count} keyword(s): {string.Join(", ", matchedKeywords)}" : "";
-                                                LogDebug($"Frame at {FormatTime(timestamp)}: ✓ MATCH - High text density ({charCount} chars){keywordBonus}");
+                                                LogDebug(() =>
+                                                {
+                                                    var keywordBonus = matchedKeywords.Count > 0 ? $" + {matchedKeywords.Count} keyword(s): {string.Join(", ", matchedKeywords)}" : "";
+                                                    return $"Frame at {FormatTime(timestamp)}: ✓ MATCH - High text density ({charCount} chars){keywordBonus}";
+                                                });
                                             }
                                         }
                                         else
@@ -1797,7 +1763,7 @@ namespace EmbyCredits.Services.DetectionMethods
 
                                             if (matchedKeywords.Count > 0 && !densityDetected)
                                             {
-                                                LogDebug($"Frame at {FormatTime(timestamp)}: ✓ MATCH - Found {matchedKeywords.Count} keyword(s): {string.Join(", ", matchedKeywords)}");
+                                                LogDebug(() => $"Frame at {FormatTime(timestamp)}: ✓ MATCH - Found {matchedKeywords.Count} keyword(s): {string.Join(", ", matchedKeywords)}");
                                             }
 
                                             if (Configuration.OcrConsecutiveMatchesForEarlyStop > 0)
@@ -1869,7 +1835,7 @@ namespace EmbyCredits.Services.DetectionMethods
                                         characterDensityHistory.Add((timestamp, 0));
                                         consecutiveMatches = 0;
                                         recentMatches.Add((timestamp, 0));
-                                        LogDebug($"Frame at {FormatTime(timestamp)}: No text detected");
+                                        LogDebug(() => $"Frame at {FormatTime(timestamp)}: No text detected");
                                     }
                                 }
 
@@ -2002,16 +1968,6 @@ namespace EmbyCredits.Services.DetectionMethods
             }
         }
 
-        private static int FindSequence(List<byte> haystack, ReadOnlySpan<byte> needle, int startIndex)
-        {
-            if (needle.Length == 0 || haystack.Count < needle.Length + startIndex)
-                return -1;
-
-            var span = CollectionsMarshal.AsSpan(haystack);
-            var idx = span.Slice(startIndex).IndexOf(needle);
-            return idx == -1 ? -1 : idx + startIndex;
-        }
-
         private async Task<(string text, double confidence)> PerformOcrOnFrameData(byte[] frameData, CancellationToken cancellationToken)
         {
             if (Configuration.OcrEngine == OcrEngine.PaddleOCR)
@@ -2065,7 +2021,7 @@ namespace EmbyCredits.Services.DetectionMethods
                         };
                     }
                     
-                    var options = JsonSerializer.Serialize(optionsDict);
+                    var options = SimpleJson.Serialize(optionsDict);
                     using (var optionsContent = new StringContent(options))
                     {
                         content.Add(optionsContent, "options");
@@ -2079,10 +2035,7 @@ namespace EmbyCredits.Services.DetectionMethods
                             {
                                 var jsonResponse = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                                 LogDebug($"OCR response: {jsonResponse}");
-                                var ocrResult = JsonSerializer.Deserialize<OcrResponse>(jsonResponse, new JsonSerializerOptions 
-                                { 
-                                    PropertyNameCaseInsensitive = true 
-                                });
+                                var ocrResult = SimpleJson.Deserialize<OcrResponse>(jsonResponse);
 
                                 if (ocrResult?.Data?.Stdout != null)
                                 {
@@ -2146,10 +2099,7 @@ namespace EmbyCredits.Services.DetectionMethods
                                 var jsonResponse = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                                 LogDebug($"PaddleOCR response: {jsonResponse}");
                                 
-                                var ocrResult = JsonSerializer.Deserialize<OcrResponse>(jsonResponse, new JsonSerializerOptions 
-                                { 
-                                    PropertyNameCaseInsensitive = true 
-                                });
+                                var ocrResult = SimpleJson.Deserialize<OcrResponse>(jsonResponse);
 
                                 if (ocrResult?.Data?.Stdout != null)
                                 {
@@ -2196,17 +2146,18 @@ namespace EmbyCredits.Services.DetectionMethods
                         RedirectStandardError = true,
                         CreateNoWindow = true
                     };
-                    psi.ArgumentList.Add("-v");
-                    psi.ArgumentList.Add("error");
-                    psi.ArgumentList.Add("-select_streams");
-                    psi.ArgumentList.Add("v:0");
-                    psi.ArgumentList.Add("-show_entries");
-                    psi.ArgumentList.Add("stream=codec_name");
-                    psi.ArgumentList.Add("-of");
-                    psi.ArgumentList.Add("default=noprint_wrappers=1:nokey=1");
-                    psi.ArgumentList.Add(FFmpegHelper.ResolveInputPath(path));
+                    psi.ArgumentList().Add("-v");
+                    psi.ArgumentList().Add("error");
+                    psi.ArgumentList().Add("-select_streams");
+                    psi.ArgumentList().Add("v:0");
+                    psi.ArgumentList().Add("-show_entries");
+                    psi.ArgumentList().Add("stream=codec_name");
+                    psi.ArgumentList().Add("-of");
+                    psi.ArgumentList().Add("default=noprint_wrappers=1:nokey=1");
+                    psi.ArgumentList().Add(FFmpegHelper.ResolveInputPath(path));
 
                     using var process = new Process { StartInfo = psi };
+                    psi.ApplyArgumentList();
                     process.Start();
                     var output = process.StandardOutput.ReadToEnd();
                     process.WaitForExit(5000);
@@ -2277,7 +2228,7 @@ namespace EmbyCredits.Services.DetectionMethods
                             ? "/dev/dri/renderD128" 
                             : Configuration.OcrHardwareDevice;
                         args.Add($"-vaapi_device {vaapiDevice}");
-                        if (!string.IsNullOrWhiteSpace(videoPath) && IsAv1Video(videoPath))
+                        if (!string.IsNullOrWhiteSpace(videoPath) && IsAv1Video(videoPath!))
                         {
                             args.Add("-c:v av1_vaapi");
                             LogDebug("AV1 source detected - using av1_vaapi hardware decoder");
@@ -2306,7 +2257,7 @@ namespace EmbyCredits.Services.DetectionMethods
                             args.Add("-hwaccel qsv");
                             args.Add("-hwaccel_device qs");
                             args.Add("-filter_hw_device qs");
-                            if (!string.IsNullOrWhiteSpace(videoPath) && IsAv1Video(videoPath))
+                            if (!string.IsNullOrWhiteSpace(videoPath) && IsAv1Video(videoPath!))
                             {
                                 args.Add("-c:v av1_qsv");
                                 LogDebug("AV1 source detected - using av1_qsv hardware decoder");
@@ -2334,7 +2285,7 @@ namespace EmbyCredits.Services.DetectionMethods
                             {
                                 args.Add("-hwaccel qsv");
                             }
-                            if (!string.IsNullOrWhiteSpace(videoPath) && IsAv1Video(videoPath))
+                            if (!string.IsNullOrWhiteSpace(videoPath) && IsAv1Video(videoPath!))
                             {
                                 args.Add("-c:v av1_qsv");
                                 LogDebug("AV1 source detected - using av1_qsv hardware decoder");
@@ -2357,7 +2308,7 @@ namespace EmbyCredits.Services.DetectionMethods
                         {
                             args.Add($"-hwaccel_device {Configuration.OcrHardwareDevice}");
                         }
-                        if (!string.IsNullOrWhiteSpace(videoPath) && IsAv1Video(videoPath))
+                        if (!string.IsNullOrWhiteSpace(videoPath) && IsAv1Video(videoPath!))
                         {
                             args.Add("-c:v av1_cuvid");
                             LogDebug("AV1 source detected - using av1_cuvid hardware decoder");
@@ -2379,7 +2330,7 @@ namespace EmbyCredits.Services.DetectionMethods
                         {
                             args.Add($"-hwaccel_device {Configuration.OcrHardwareDevice}");
                         }
-                        if (!string.IsNullOrWhiteSpace(videoPath) && IsAv1Video(videoPath))
+                        if (!string.IsNullOrWhiteSpace(videoPath) && IsAv1Video(videoPath!))
                         {
                             args.Add("-c:v av1_cuvid");
                             LogDebug("AV1 source detected - using av1_cuvid hardware decoder");
@@ -2401,7 +2352,7 @@ namespace EmbyCredits.Services.DetectionMethods
                         {
                             args.Add($"-hwaccel_device {Configuration.OcrHardwareDevice}");
                         }
-                        if (!string.IsNullOrWhiteSpace(videoPath) && IsAv1Video(videoPath))
+                        if (!string.IsNullOrWhiteSpace(videoPath) && IsAv1Video(videoPath!))
                         {
                             args.Add("-c:v av1");
                             LogDebug("AV1 source detected - using av1 decoder with D3D11VA acceleration");
@@ -2419,7 +2370,7 @@ namespace EmbyCredits.Services.DetectionMethods
                     
                     case "dxva2":
                         args.Add("-hwaccel dxva2");
-                        if (!string.IsNullOrWhiteSpace(videoPath) && IsAv1Video(videoPath))
+                        if (!string.IsNullOrWhiteSpace(videoPath) && IsAv1Video(videoPath!))
                         {
                             LogWarn("AV1 source detected but DXVA2 does not support AV1 hardware decoding - falling back to software decoder");
                         }
@@ -2469,96 +2420,207 @@ namespace EmbyCredits.Services.DetectionMethods
                 if (c == '"') { inQuotes = !inQuotes; }
                 else if (c == ' ' && !inQuotes)
                 {
-                    if (token.Length > 0) { psi.ArgumentList.Add(token.ToString()); token.Clear(); }
+                    if (token.Length > 0) { psi.ArgumentList().Add(token.ToString()); token.Clear(); }
                 }
                 else { token.Append(c); }
             }
-            if (token.Length > 0) psi.ArgumentList.Add(token.ToString());
+            if (token.Length > 0) psi.ArgumentList().Add(token.ToString());
         }
 
-        private string BuildFilterChain(double fps)
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _toneMapPipelineChecks
+            = new System.Collections.Concurrent.ConcurrentDictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+
+        private string HardwareType =>
+            Configuration.OcrEnableHardwareAcceleration && !string.IsNullOrWhiteSpace(Configuration.OcrHardwareAccelerationType)
+                ? Configuration.OcrHardwareAccelerationType.ToLowerInvariant()
+                : "none";
+
+        private bool HardwareFramesStayOnGpu =>
+            HardwareType != "none" &&
+            Configuration.OcrUseHardwareOutputFormat &&
+            string.IsNullOrWhiteSpace(Configuration.OcrFfmpegPreInputArgs);
+
+        private bool UseHardwareFilters => HardwareFramesStayOnGpu && Configuration.OcrUseHardwareFilters;
+
+        private int MaxFrameHeight =>
+            Configuration.OcrMaxResolutionHeight > 0 && Configuration.OcrMaxResolutionHeight < 4320
+                ? Configuration.OcrMaxResolutionHeight
+                : 0;
+
+        private string BuildFilterChain(double fps, string? videoPath = null)
         {
-            var filters = new List<string>(10);
-            
-            bool useHwFilters = Configuration.OcrEnableHardwareAcceleration && 
-                               Configuration.OcrUseHardwareOutputFormat && 
-                               Configuration.OcrUseHardwareFilters &&
-                               !string.IsNullOrWhiteSpace(Configuration.OcrHardwareAccelerationType) &&
-                               Configuration.OcrHardwareAccelerationType != "none";
-            
-            filters.Add($"fps={fps.ToString(CultureInfo.InvariantCulture)}");
-            
-            if (useHwFilters)
+            VideoColorInfo? colorInfo = null;
+            if (!string.IsNullOrWhiteSpace(videoPath) && (Configuration.OcrEnableHdrToneMapping || HardwareFramesStayOnGpu))
+                colorInfo = HdrToneMapping.Probe(videoPath!, Configuration, Logger);
+
+            var toneMap = colorInfo != null && ShouldToneMap(videoPath!, colorInfo);
+            return ComposeFilterChain(fps, colorInfo, toneMap);
+        }
+
+        private bool ShouldToneMap(string videoPath, VideoColorInfo colorInfo)
+        {
+            if (!Configuration.OcrEnableHdrToneMapping || !colorInfo.IsHdrTransfer)
+                return false;
+
+            if (colorInfo.IsDolbyVisionWithoutHdrBase)
             {
-                var hwAccelType = Configuration.OcrHardwareAccelerationType.ToLowerInvariant();
-                
-                if (Configuration.OcrMaxResolutionHeight > 0 && Configuration.OcrMaxResolutionHeight < 4320)
+                LogInfo($"Dolby Vision profile {colorInfo.DolbyVisionProfile} without an HDR10 base layer - OCR frames are used without tone mapping");
+                return false;
+            }
+
+            if (!HdrToneMapping.AreFiltersAvailable(Logger))
+                return false;
+
+            var pipelineKey = string.Join("|",
+                HardwareType,
+                Configuration.OcrUseHardwareOutputFormat,
+                Configuration.OcrUseHardwareFilters,
+                string.IsNullOrWhiteSpace(Configuration.OcrFfmpegPreInputArgs),
+                colorInfo.IsHighBitDepth,
+                MaxFrameHeight);
+
+            var works = _toneMapPipelineChecks.GetOrAdd(pipelineKey, _ => TestToneMapPipeline(videoPath, colorInfo));
+            if (works)
+                LogDebug($"HDR source ({colorInfo.Transfer}) - tone mapping OCR frames");
+            return works;
+        }
+
+        private bool TestToneMapPipeline(string videoPath, VideoColorInfo colorInfo)
+        {
+            try
+            {
+                var inputPath = FFmpegHelper.ResolveInputPath(videoPath);
+                var startInfo = new ProcessStartInfo
                 {
-                    switch (hwAccelType)
-                    {
-                        case "vaapi":
-                            filters.Add($"scale_vaapi=w=-2:h='min({Configuration.OcrMaxResolutionHeight},ih)':format=nv12");
-                            LogDebug($"Resolution limiting: Using VAAPI hardware scaling to max height {Configuration.OcrMaxResolutionHeight}px");
-                            break;
-                        
-                        case "qsv":
-                            filters.Add($"scale_qsv=w=-2:h='min({Configuration.OcrMaxResolutionHeight},ih)':format=nv12");
-                            LogDebug($"Resolution limiting: Using QSV hardware scaling to max height {Configuration.OcrMaxResolutionHeight}px");
-                            break;
-                        
-                        case "cuda":
-                        case "nvdec":
-                            filters.Add($"scale_cuda=w=-2:h='min({Configuration.OcrMaxResolutionHeight},ih)':format=nv12");
-                            LogDebug($"Resolution limiting: Using CUDA hardware scaling to max height {Configuration.OcrMaxResolutionHeight}px");
-                            break;
-                    }
+                    FileName = FFmpegHelper.GetFfmpegPath(),
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+                startInfo.ArgumentList().Add("-hide_banner");
+                startInfo.ArgumentList().Add("-loglevel");
+                startInfo.ArgumentList().Add("error");
+                AddTokenizedArgs(startInfo, BuildPreInputArgs(videoPath));
+                startInfo.ArgumentList().Add("-ss");
+                startInfo.ArgumentList().Add("30");
+                FFmpegHelper.AddStrmNetworkResilienceArgs(startInfo, videoPath, inputPath, Configuration);
+                startInfo.ArgumentList().Add("-i");
+                startInfo.ArgumentList().Add(inputPath);
+                startInfo.ArgumentList().Add("-frames:v");
+                startInfo.ArgumentList().Add("1");
+                startInfo.ArgumentList().Add("-an");
+                startInfo.ArgumentList().Add("-sn");
+                startInfo.ArgumentList().Add("-vf");
+                startInfo.ArgumentList().Add(ComposeFilterChain(1, colorInfo, toneMap: true));
+                startInfo.ArgumentList().Add("-f");
+                startInfo.ArgumentList().Add("null");
+                startInfo.ArgumentList().Add("-");
+
+                using var process = new Process { StartInfo = startInfo };
+                startInfo.ApplyArgumentList();
+                process.Start();
+                var stdoutTask = process.StandardOutput.ReadToEndAsync();
+                var stderrTask = process.StandardError.ReadToEndAsync();
+
+                if (!Task.WaitAll(new Task[] { stdoutTask, stderrTask }, 60000))
+                {
+                    try { if (!process.HasExited) process.Kill(); } catch { }
+                    LogWarn("HDR tone mapping test timed out - OCR frames are used without tone mapping");
+                    return false;
+                }
+
+                process.WaitForExit(5000);
+                if (process.ExitCode == 0)
+                {
+                    LogInfo($"HDR tone mapping works with the current OCR settings (hardware: {HardwareType})");
+                    return true;
+                }
+
+                var error = stderrTask.Result.Trim();
+                LogWarn($"HDR tone mapping does not work with the current OCR hardware settings ({HardwareType}) - OCR frames are used without tone mapping. FFmpeg said: {(error.Length > 300 ? error.Substring(0, 300) : error)}");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                LogWarn($"HDR tone mapping test failed - OCR frames are used without tone mapping: {ex.Message}");
+                return false;
+            }
+        }
+
+        private string ComposeFilterChain(double fps, VideoColorInfo? colorInfo, bool toneMap)
+        {
+            var filters = new List<string>(12);
+            var highBitDepth = colorInfo?.IsHighBitDepth == true;
+            var downloadFormat = highBitDepth ? "p010le" : "nv12";
+            var maxHeight = MaxFrameHeight;
+            var softwareScale = maxHeight > 0 ? $"scale=-2:'min({maxHeight},ih)':flags=lanczos" : null;
+            var needsSoftwareScale = true;
+
+            filters.Add($"fps={fps.ToString(CultureInfo.InvariantCulture)}");
+
+            if (UseHardwareFilters)
+            {
+                var hwAccelType = HardwareType;
+                string? hardwareScale = null;
+                var hardwareFormat = "nv12";
+                var sizeArgs = maxHeight > 0 ? $"w=-2:h='min({maxHeight},ih)':" : string.Empty;
+
+                switch (hwAccelType)
+                {
+                    case "vaapi":
+                        hardwareScale = $"scale_vaapi={sizeArgs}format=nv12{(toneMap ? string.Empty : ":out_range=pc")}";
+                        break;
+                    case "qsv":
+                        hardwareScale = $"scale_qsv={sizeArgs}format=nv12";
+                        break;
+                    case "cuda":
+                    case "nvdec":
+                        hardwareFormat = toneMap && highBitDepth ? "p010le" : "nv12";
+                        hardwareScale = $"scale_cuda={sizeArgs}format={hardwareFormat}";
+                        break;
+                }
+
+                if (hardwareScale != null)
+                {
+                    filters.Add(hardwareScale);
+                    filters.Add("hwdownload");
+                    filters.Add($"format={hardwareFormat}");
+                    needsSoftwareScale = false;
+                    LogDebug($"Hardware filters: fps -> {hwAccelType} scale ({hardwareFormat}) -> hwdownload -> software filters");
                 }
                 else
                 {
-                    switch (hwAccelType)
-                    {
-                        case "vaapi":
-                            filters.Add("scale_vaapi=format=nv12");
-                            LogDebug($"Using VAAPI hardware scaling");
-                            break;
-                        
-                        case "qsv":
-                            filters.Add("scale_qsv=format=nv12");
-                            LogDebug($"Using QSV hardware scaling");
-                            break;
-                        
-                        case "cuda":
-                        case "nvdec":
-                            filters.Add("scale_cuda=format=nv12");
-                            LogDebug($"Using CUDA hardware scaling");
-                            break;
-                    }
+                    filters.Add("hwdownload");
+                    filters.Add($"format={downloadFormat}");
+                    LogDebug($"Hardware filters: no {hwAccelType} scaler available, downloading frames ({downloadFormat}) and scaling in software");
                 }
-                
+            }
+            else if (HardwareFramesStayOnGpu)
+            {
                 filters.Add("hwdownload");
-                filters.Add("format=nv12");
-                LogDebug($"Hardware filters: fps -> {hwAccelType} scale -> hwdownload -> software filters");
+                filters.Add($"format={downloadFormat}");
+                LogDebug($"Hardware output format without hardware filters: downloading frames ({downloadFormat}) before software filters");
             }
-            else if (Configuration.OcrEnableHardwareAcceleration)
+
+            if (needsSoftwareScale && softwareScale != null)
             {
-                LogDebug($"Using software filters (HW filters disabled in config)");
-                
-                if (Configuration.OcrMaxResolutionHeight > 0 && Configuration.OcrMaxResolutionHeight < 4320)
+                filters.Add(toneMap ? softwareScale : softwareScale + ":out_range=pc");
+                if (!toneMap)
                 {
-                    filters.Add($"scale=-2:'min({Configuration.OcrMaxResolutionHeight},ih)':flags=lanczos");
-                    LogDebug($"Resolution limiting: Scaling to max height {Configuration.OcrMaxResolutionHeight}px");
+                    LogDebug($"Resolution limiting: Using software scaling to max height {maxHeight}px");
                 }
             }
-            else
+
+            if (toneMap && colorInfo != null)
             {
-                if (Configuration.OcrMaxResolutionHeight > 0 && Configuration.OcrMaxResolutionHeight < 4320)
-                {
-                    filters.Add($"scale=-2:'min({Configuration.OcrMaxResolutionHeight},ih)':flags=lanczos");
-                    LogDebug($"Resolution limiting: Scaling to max height {Configuration.OcrMaxResolutionHeight}px");
-                }
+                filters.Add(HdrToneMapping.BuildToneMapFilter(colorInfo));
             }
-            
-            if (Configuration.OcrEnableRoiDetection && !string.IsNullOrWhiteSpace(Configuration.OcrRoiRegion))
+            else if (!needsSoftwareScale || softwareScale == null)
+            {
+                filters.Add("scale=out_range=pc");
+            }
+
             if (Configuration.OcrEnableRoiDetection && !string.IsNullOrWhiteSpace(Configuration.OcrRoiRegion))
             {
                 var roi = Configuration.OcrRoiRegion.ToLowerInvariant();
@@ -2566,47 +2628,39 @@ namespace EmbyCredits.Services.DetectionMethods
                 {
                     case "bottom_third":
                         filters.Add("crop=iw:ih/3:0:ih*2/3");
-                        LogDebug("ROI: Cropping to bottom third of frame");
+                        LogDebug("ROI: Processing bottom third of frame");
                         break;
                     case "bottom_half":
                         filters.Add("crop=iw:ih/2:0:ih/2");
-                        LogDebug("ROI: Cropping to bottom half of frame");
+                        LogDebug("ROI: Processing bottom half of frame");
                         break;
                     case "center":
                         filters.Add("crop=iw:ih*0.6:0:ih*0.2");
-                        LogDebug("ROI: Cropping to center 60% of frame");
+                        LogDebug("ROI: Processing center 60% of frame");
                         break;
                     case "top_third":
                         filters.Add("crop=iw:ih/3:0:0");
-                        LogDebug("ROI: Cropping to top third of frame");
+                        LogDebug("ROI: Processing top third of frame");
                         break;
                     case "full":
                     default:
                         break;
                 }
             }
-            
+
             if (Configuration.OcrEnableImagePreprocessing)
             {
-                var preprocessFilters = new List<string>();
-                
                 if (Configuration.OcrContrastEnhancement != 1.0 || Configuration.OcrBrightnessAdjustment != 0.0)
                 {
-                    preprocessFilters.Add($"eq=contrast={Configuration.OcrContrastEnhancement.ToString(CultureInfo.InvariantCulture)}:brightness={Configuration.OcrBrightnessAdjustment.ToString(CultureInfo.InvariantCulture)}");
+                    filters.Add($"eq=contrast={Configuration.OcrContrastEnhancement.ToString(CultureInfo.InvariantCulture)}:brightness={Configuration.OcrBrightnessAdjustment.ToString(CultureInfo.InvariantCulture)}");
                 }
-                
+
                 if (Configuration.OcrEnableSharpening)
                 {
-                    preprocessFilters.Add($"unsharp=5:5:{Configuration.OcrSharpenAmount.ToString(CultureInfo.InvariantCulture)}");
-                }
-                
-                if (preprocessFilters.Count > 0)
-                {
-                    filters.AddRange(preprocessFilters);
-                    LogDebug($"Image preprocessing: {string.Join(", ", preprocessFilters)}");
+                    filters.Add($"unsharp=5:5:{Configuration.OcrSharpenAmount.ToString(CultureInfo.InvariantCulture)}");
                 }
             }
-            
+
             return string.Join(",", filters);
         }
 
@@ -2846,7 +2900,7 @@ namespace EmbyCredits.Services.DetectionMethods
                         }
                     }
                 }
-                catch (JsonException ex)
+                catch (SimpleJsonException ex)
                 {
                     LogWarn($"Failed to parse OCR JSON response: {ex.Message}. Attempting fallback parsing.");
 
@@ -2933,7 +2987,7 @@ namespace EmbyCredits.Services.DetectionMethods
         {
             if (string.IsNullOrWhiteSpace(keywordString))
             {
-                _normalizedKeywordCache = Array.Empty<(string, string)>();
+                _normalizedKeywordCache = Array.Empty<NormalizedKeyword>();
                 return new List<string>();
             }
 
@@ -2952,7 +3006,7 @@ namespace EmbyCredits.Services.DetectionMethods
                 {
                     var lower = k.ToLowerInvariant();
                     var lowerCollapsed = _multipleWhitespaceRegex.Replace(lower, "");
-                    return (lower, lowerCollapsed);
+                    return new NormalizedKeyword(lower, lowerCollapsed);
                 }).ToArray();
             });
 
@@ -2970,9 +3024,9 @@ namespace EmbyCredits.Services.DetectionMethods
 
             for (int i = 0; i < keywords.Count; i++)
             {
-                var (lowerKeyword, lowerKeywordCollapsed) = _normalizedKeywordCache[i];
-                
-                if (lowerText.Contains(lowerKeyword))
+                var keyword = _normalizedKeywordCache[i];
+
+                if (ContainsKeyword(lowerText, keyword.Lower, keyword))
                 {
                     matches.Add(keywords[i]);
                 }
@@ -2980,8 +3034,8 @@ namespace EmbyCredits.Services.DetectionMethods
                 {
                     if (textCollapsedSpaces == null)
                         textCollapsedSpaces = _multipleWhitespaceRegex.Replace(text, "").ToLowerInvariant();
-                        
-                    if (textCollapsedSpaces.Contains(lowerKeywordCollapsed))
+
+                    if (ContainsKeyword(textCollapsedSpaces, keyword.LowerCollapsed, keyword))
                     {
                         matches.Add(keywords[i]);
                     }
@@ -2989,6 +3043,54 @@ namespace EmbyCredits.Services.DetectionMethods
             }
 
             return matches;
+        }
+
+        private static bool UsesWordSeparatedScript(string keyword)
+        {
+            var hasLetter = false;
+            foreach (var c in keyword)
+            {
+                if (!char.IsLetter(c))
+                    continue;
+
+                hasLetter = true;
+                if (c >= 0x2E80)
+                    return false;
+            }
+            return hasLetter;
+        }
+
+        private static bool ContainsKeyword(string text, string keyword, NormalizedKeyword options)
+        {
+            if (string.IsNullOrEmpty(keyword))
+                return false;
+
+            if (!options.RequireStartBoundary)
+                return text.IndexOf(keyword, StringComparison.Ordinal) >= 0;
+
+            var index = text.IndexOf(keyword, StringComparison.Ordinal);
+            while (index >= 0)
+            {
+                var startOk = index == 0 || !char.IsLetterOrDigit(text[index - 1]);
+                var end = index + keyword.Length;
+                var endOk = !options.RequireEndBoundary || end >= text.Length || !char.IsLetterOrDigit(text[end]);
+                if (startOk && endOk)
+                    return true;
+
+                index = text.IndexOf(keyword, index + 1, StringComparison.Ordinal);
+            }
+
+            return false;
+        }
+
+        private static int GetAllowedFuzzyDistance(string keyword, int maxDistance)
+        {
+            var letters = keyword.Count(char.IsLetter);
+            if (letters <= ShortKeywordLength)
+                return 0;
+            if (letters <= 7)
+                return Math.Min(1, maxDistance);
+            return maxDistance;
         }
         
         private bool IsJapaneseText(string text)
@@ -3018,26 +3120,34 @@ namespace EmbyCredits.Services.DetectionMethods
 
             for (int i = 0; i < keywords.Count; i++)
             {
-                var (lowerKeyword, lowerKeywordCollapsed) = _normalizedKeywordCache[i];
+                var keyword = _normalizedKeywordCache[i];
 
-                if (lowerText.Contains(lowerKeyword))
+                if (ContainsKeyword(lowerText, keyword.Lower, keyword))
                 {
                     matches.Add(keywords[i]);
                     continue;
                 }
 
-                if (textCollapsedSpaces.Contains(lowerKeywordCollapsed))
+                if (ContainsKeyword(textCollapsedSpaces, keyword.LowerCollapsed, keyword))
                 {
                     matches.Add(keywords[i]);
                     continue;
                 }
 
-                foreach (var word in words)
+                var allowedDistance = GetAllowedFuzzyDistance(keyword.Lower, maxDistance);
+                if (allowedDistance <= 0 || keyword.WordCount == 0 || words.Length < keyword.WordCount)
+                    continue;
+
+                for (int w = 0; w + keyword.WordCount <= words.Length; w++)
                 {
-                    if (OcrOptimizations.LevenshteinDistance(word, lowerKeyword) <= maxDistance)
+                    var candidate = keyword.WordCount == 1
+                        ? words[w]
+                        : string.Join(" ", words, w, keyword.WordCount);
+                    var distance = OcrOptimizations.LevenshteinDistance(candidate, keyword.Lower);
+                    if (distance <= allowedDistance)
                     {
                         matches.Add(keywords[i]);
-                        LogDebug($"Fuzzy match: '{word}' ≈ '{keywords[i]}' (distance: {OcrOptimizations.LevenshteinDistance(word, lowerKeyword)})");
+                        LogDebug(() => $"Fuzzy match: '{candidate}' ≈ '{keywords[i]}' (distance: {distance})");
                         break;
                     }
                 }
