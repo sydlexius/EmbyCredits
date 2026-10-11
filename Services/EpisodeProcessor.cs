@@ -37,6 +37,7 @@ namespace EmbyCredits.Services
         private readonly VideoValidator _videoValidator;
         private readonly TheIntroDbService? _theIntroDbService;
         private const int StrmProbeTimeoutSeconds = 20;
+        public const string RemovedDuringDetectionReason = "Removed from library during detection";
 
         public EpisodeProcessor(
             ILogger logger,
@@ -290,6 +291,12 @@ return (false, 0, "Could not determine video duration", 0, string.Empty, string.
             {
                 _debugLogger.LogInfo($"Processing episode with batch result: {episode.Name} (S{episode.ParentIndexNumber}E{episode.IndexNumber})");
 
+                if (Utilities.ItemLookupHelper.IsRemovedFromLibrary(_libraryManager, episode))
+                {
+                    _debugLogger.LogWarn($"Episode was removed before detection: {episode.Path}");
+                    return (false, 0, RemovedDuringDetectionReason, 0, string.Empty, string.Empty);
+                }
+
                 var effectiveConfig = _ruleMatchingService.GetEffectiveConfiguration(episode);
                 if (effectiveConfig.DisableDetection)
                 {
@@ -489,6 +496,12 @@ return (false, 0, "No valid duration", 0, string.Empty, string.Empty);
             if (isDryRun || !_configuration.SkipPreviouslyFailedEpisodes || CreditsDetectionService.IsCancellationRequested)
                 return;
 
+            if (Utilities.ItemLookupHelper.IsRemovedFromLibrary(_libraryManager, episode))
+            {
+                _debugLogger.LogInfo($"Not marking {episode.Name} as failed - it was removed during detection");
+                return;
+            }
+
             try
             {
                 if (episode.ProviderIds == null)
@@ -654,6 +667,12 @@ return (false, 0, "No valid duration", 0, string.Empty, string.Empty);
         public bool SaveDetectionMarkers(Episode episode, double creditsMarkerSeconds, PostCreditsCheckResult? postCredits, out string failureReason)
         {
             failureReason = string.Empty;
+
+            if (Utilities.ItemLookupHelper.IsRemovedFromLibrary(_libraryManager, episode))
+            {
+                failureReason = RemovedDuringDetectionReason;
+                return false;
+            }
 
             if (postCredits?.SkipCreditsMarker == true)
             {

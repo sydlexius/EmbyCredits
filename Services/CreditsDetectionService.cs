@@ -78,6 +78,7 @@ namespace EmbyCredits.Services
 
         private const int DispatchRetryDelayMs = 60000;
         private const int MaxDispatchRetries = 30;
+        private const int MaxWriteWaits = 720;
         private static volatile bool _isManualDetectionRun = false;
         private static bool _previousRestoreAfterScanState = false;
         private static bool _previousItemAddedHandlerState = false;
@@ -659,17 +660,22 @@ namespace EmbyCredits.Services
                     if (!autoDetect)
                         return;
 
-                    var seasonKey = $"{episode.SeriesId}_{episode.ParentIndexNumber!.Value}";
-                    var dispatchState = _pendingSeasonDispatches.GetOrAdd(seasonKey, _ => new SeasonDispatchState());
-                    dispatchState.EpisodeIds.TryAdd(episode.Id, 0);
-                    LogInfo($"Registered '{episode.Name}' in dispatch window for '{episode.SeriesName}' Season {episode.ParentIndexNumber}");
-                    dispatchState.ResetTimer(20000, () => DispatchPendingSeason(seasonKey));
+                    RegisterForDispatch(episode);
                 }
             }
             catch (Exception ex)
             {
                 LogError($"Error handling ItemAdded event for {e.Item?.Name}", ex);
             }
+        }
+
+        private static void RegisterForDispatch(Episode episode)
+        {
+            var seasonKey = $"{episode.SeriesId}_{episode.ParentIndexNumber!.Value}";
+            var dispatchState = _pendingSeasonDispatches.GetOrAdd(seasonKey, _ => new SeasonDispatchState());
+            dispatchState.EpisodeIds.TryAdd(episode.Id, 0);
+            LogInfo($"Registered '{episode.Name}' in dispatch window for '{episode.SeriesName}' Season {episode.ParentIndexNumber}");
+            dispatchState.ResetTimer(20000, () => DispatchPendingSeason(seasonKey));
         }
 
         private static void DispatchPendingSeason(string seasonKey)
@@ -691,14 +697,35 @@ namespace EmbyCredits.Services
 
                     var validEpisodes = new List<Episode>();
                     var notReadyIds = new List<Guid>();
+                    var writingIds = new List<Guid>();
+                    var removedCount = 0;
                     foreach (var id in episodeIds)
                     {
                         var ep = _libraryManager.GetItemById(id) as Episode;
-                        if (ep == null || string.IsNullOrEmpty(ep.Path)) continue;
+                        if (ep == null)
+                        {
+                            removedCount++;
+                            continue;
+                        }
+                        if (string.IsNullOrEmpty(ep.Path)) continue;
 
                         if (ep.Path.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
                             ep.Path.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
                             continue;
+
+                        if (FileWriteGuard.IsBeingRecorded(ep) || FileWriteGuard.HasActiveRecordingInFolderOf(ep))
+                        {
+                            LogDebug($"DVR recording in progress for {ep.Name} (or its season folder)");
+                            writingIds.Add(id);
+                            continue;
+                        }
+
+                        if (FileWriteGuard.WasModifiedRecently(ep.Path))
+                        {
+                            LogDebug($"File modified within the last {FileWriteGuard.QuietPeriodSeconds}s, still being written: {ep.Name}");
+                            writingIds.Add(id);
+                            continue;
+                        }
 
                         try
                         {
@@ -710,12 +737,6 @@ namespace EmbyCredits.Services
                             }
                             var fi = new FileInfo(ep.Path);
                             using (fi.Open(FileMode.Open, FileAccess.Read, FileShare.Read)) { }
-                            if ((DateTime.UtcNow - fi.LastWriteTimeUtc).TotalSeconds < 5)
-                            {
-                                LogDebug($"File still being modified: {ep.Name}");
-                                notReadyIds.Add(id);
-                                continue;
-                            }
                             validEpisodes.Add(ep);
                         }
                         catch (IOException)
@@ -729,16 +750,39 @@ namespace EmbyCredits.Services
                         }
                     }
 
+                    if (writingIds.Count > 0)
+                    {
+                        var nextWait = state.WriteWaitCount + 1;
+                        if (nextWait <= MaxWriteWaits)
+                        {
+                            var message = $"{writingIds.Count} episode(s) in dispatch '{seasonKey}' are still being recorded or written - holding the season until writing finishes";
+                            if (nextWait == 1 || nextWait % 30 == 0)
+                                LogInfo(message);
+                            else
+                                LogDebug(message);
+                            var waitState = _pendingSeasonDispatches.GetOrAdd(seasonKey, _ => new SeasonDispatchState());
+                            foreach (var id in episodeIds)
+                                waitState.EpisodeIds.TryAdd(id, 0);
+                            waitState.RetryCount = Math.Max(waitState.RetryCount, state.RetryCount);
+                            waitState.WriteWaitCount = Math.Max(waitState.WriteWaitCount, nextWait);
+                            waitState.ResetTimer(DispatchRetryDelayMs, () => DispatchPendingSeason(seasonKey));
+                            return;
+                        }
+
+                        LogWarn($"Gave up waiting for {writingIds.Count} episode(s) still being written in dispatch '{seasonKey}' after {MaxWriteWaits * DispatchRetryDelayMs / 3600000}h - they will be picked up by the next scheduled run");
+                    }
+
                     if (notReadyIds.Count > 0)
                     {
                         var nextAttempt = state.RetryCount + 1;
                         if (nextAttempt <= MaxDispatchRetries)
                         {
-                            LogInfo($"{notReadyIds.Count} episode(s) in dispatch '{seasonKey}' are still being written - retrying the season in {DispatchRetryDelayMs / 1000}s (attempt {nextAttempt}/{MaxDispatchRetries})");
+                            LogInfo($"{notReadyIds.Count} episode(s) in dispatch '{seasonKey}' are not available yet - retrying the season in {DispatchRetryDelayMs / 1000}s (attempt {nextAttempt}/{MaxDispatchRetries})");
                             var retryState = _pendingSeasonDispatches.GetOrAdd(seasonKey, _ => new SeasonDispatchState());
                             foreach (var id in episodeIds)
                                 retryState.EpisodeIds.TryAdd(id, 0);
                             retryState.RetryCount = Math.Max(retryState.RetryCount, nextAttempt);
+                            retryState.WriteWaitCount = Math.Max(retryState.WriteWaitCount, state.WriteWaitCount);
                             retryState.ResetTimer(DispatchRetryDelayMs, () => DispatchPendingSeason(seasonKey));
                             return;
                         }
@@ -748,7 +792,10 @@ namespace EmbyCredits.Services
 
                     if (validEpisodes.Count == 0)
                     {
-                        LogWarn($"No valid files ready for season dispatch '{seasonKey}'");
+                        if (removedCount > 0 && removedCount == episodeIds.Count)
+                            LogInfo($"All {removedCount} episode(s) in dispatch '{seasonKey}' were removed from the library before dispatch - nothing to do");
+                        else
+                            LogWarn($"No valid files ready for season dispatch '{seasonKey}'");
                         return;
                     }
 
@@ -823,6 +870,7 @@ namespace EmbyCredits.Services
                 AncestorIds = new[] { ancestorId }
             }).OfType<Episode>()
               .Where(e => e.ParentIndexNumber == seasonNumber)
+              .Where(e => !FileWriteGuard.IsBeingWritten(e))
               .OrderBy(e => e.IndexNumber)
               .ToList();
         }
@@ -1977,12 +2025,54 @@ namespace EmbyCredits.Services
             try
             {
                 var allEpisodes = new List<Episode>();
+                var removedCount = 0;
+                var writingCount = 0;
                 while (_processingQueue.TryDequeue(out var episode))
                 {
-                    if (episode != null)
+                    if (episode == null)
+                        continue;
+
+                    if (_libraryManager != null)
                     {
-                        allEpisodes.Add(episode);
+                        if (_libraryManager.GetItemById(episode.Id) is not Episode current)
+                        {
+                            removedCount++;
+                            var removedId = episode.Id.ToString();
+                            _singleEpisodeTargets.TryRemove(removedId, out _);
+                            _dryRunEpisodeIds.TryRemove(removedId, out _);
+                            continue;
+                        }
+                        episode = current;
                     }
+
+                    if (FileWriteGuard.IsBeingWritten(episode))
+                    {
+                        writingCount++;
+                        var writingId = episode.Id.ToString();
+                        _singleEpisodeTargets.TryRemove(writingId, out _);
+                        _dryRunEpisodeIds.TryRemove(writingId, out _);
+                        if (_configuration?.EnableAutoDetection == true && episode.ParentIndexNumber.HasValue)
+                            RegisterForDispatch(episode);
+                        continue;
+                    }
+
+                    allEpisodes.Add(episode);
+                }
+
+                if (removedCount > 0)
+                {
+                    if (Plugin.Instance != null)
+                        Plugin.Progress.TotalItems = Math.Max(0, Plugin.Progress.TotalItems - removedCount);
+                    LogInfo($"Dropped {removedCount} queued episode(s) that were removed from the library while waiting");
+                }
+
+                if (writingCount > 0)
+                {
+                    if (Plugin.Instance != null)
+                        Plugin.Progress.TotalItems = Math.Max(0, Plugin.Progress.TotalItems - writingCount);
+                    LogInfo(_configuration?.EnableAutoDetection == true
+                        ? $"Deferred {writingCount} queued episode(s) that are still being recorded or written - they will run once writing finishes"
+                        : $"Skipped {writingCount} queued episode(s) that are still being recorded or written - run detection again once they have finished");
                 }
 
                 LogInfo($"Collected {allEpisodes.Count} episodes from queue");
@@ -2334,6 +2424,16 @@ namespace EmbyCredits.Services
             {
                 LogInfo($"Using rule-based configuration for series '{seriesName}'");
             }
+
+            referenceEpisodes = referenceEpisodes
+                .Where(ep => !ItemLookupHelper.IsRemovedFromLibrary(_libraryManager, ep) && !FileWriteGuard.IsBeingWritten(ep))
+                .ToList();
+            seasonEpisodes = seasonEpisodes
+                .Where(ep => !HandleRemovedDuringDetection(ep, $"{seriesName} S{ep.ParentIndexNumber:00}E{ep.IndexNumber:00}"))
+                .Where(ep => !HandleStillBeingWritten(ep, $"{seriesName} S{ep.ParentIndexNumber:00}E{ep.IndexNumber:00}"))
+                .ToList();
+            if (seasonEpisodes.Count == 0)
+                return;
 
             if (effectiveConfig.DisableDetection)
             {
@@ -2870,6 +2970,12 @@ namespace EmbyCredits.Services
             }
             catch (Exception ex)
             {
+                if (HandleRemovedDuringDetection(episode, $"{seriesName} S{episode.ParentIndexNumber:00}E{episode.IndexNumber:00}"))
+                {
+                    CheckSeasonProgressCompletion();
+                    return;
+                }
+
                 LogError($"Error processing episode {episode.Name}", ex);
                 if (!IsDryRun(episodeId))
                 {
@@ -2887,6 +2993,46 @@ namespace EmbyCredits.Services
             }
 
             CheckSeasonProgressCompletion();
+        }
+
+        private static bool HandleRemovedDuringDetection(Episode episode, string episodeKey)
+        {
+            if (!ItemLookupHelper.IsRemovedFromLibrary(_libraryManager, episode))
+                return false;
+
+            var episodeId = episode.Id.ToString();
+            LogInfo($"'{episode.Name}' was removed from the library during detection - skipping");
+            GetAndClearEpisodeStatusMessages(episodeId);
+            Plugin.PendingEpisodesService?.MarkProcessed(episodeId);
+
+            if (Plugin.Instance != null)
+            {
+                Plugin.Progress.SkipReasons[episodeKey] = EpisodeProcessor.RemovedDuringDetectionReason;
+                Plugin.Progress.IncrementSkipped();
+            }
+            return true;
+        }
+
+        private static bool HandleStillBeingWritten(Episode episode, string episodeKey)
+        {
+            if (!FileWriteGuard.IsBeingWritten(episode))
+                return false;
+
+            var autoDetect = _configuration?.EnableAutoDetection == true && episode.ParentIndexNumber.HasValue;
+            LogInfo(autoDetect
+                ? $"'{episode.Name}' is still being recorded or written - deferring until it has finished"
+                : $"'{episode.Name}' is still being recorded or written - skipping");
+            GetAndClearEpisodeStatusMessages(episode.Id.ToString());
+
+            if (Plugin.Instance != null)
+            {
+                Plugin.Progress.SkipReasons[episodeKey] = "File still being recorded or written";
+                Plugin.Progress.IncrementSkipped();
+            }
+
+            if (autoDetect)
+                RegisterForDispatch(episode);
+            return true;
         }
 
         private static async Task FinalizeEpisodeOutcome(
@@ -2982,6 +3128,9 @@ namespace EmbyCredits.Services
             }
             else
             {
+                if (HandleRemovedDuringDetection(episode, $"{seriesName} S{episode.ParentIndexNumber:00}E{episode.IndexNumber:00}"))
+                    return;
+
                 if (Plugin.Instance != null)
                 {
                     Plugin.Progress.CompleteProcessingItem(false);
@@ -3319,7 +3468,9 @@ namespace EmbyCredits.Services
                         _processedEpisodes.TryAdd(episodeId, DateTime.UtcNow);
                     }
                 }
-                else
+                else if (!HandleRemovedDuringDetection(episode, episode.Series != null
+                    ? $"{episode.Series.Name} S{episode.ParentIndexNumber:00}E{episode.IndexNumber:00}"
+                    : episode.Name))
                 {
                     if (Plugin.Instance != null)
                     {
@@ -3331,7 +3482,7 @@ namespace EmbyCredits.Services
                             : episode.Name;
                         Plugin.Progress.FailureReasons[episodeKey] = failureReason;
                     }
-                    
+
                     GetAndClearEpisodeStatusMessages(episodeId);
 
                     if (!isDryRun)
@@ -3602,6 +3753,7 @@ namespace EmbyCredits.Services
         {
             public readonly ConcurrentDictionary<Guid, byte> EpisodeIds = new ConcurrentDictionary<Guid, byte>();
             public int RetryCount;
+            public int WriteWaitCount;
             private Timer? _timer;
             private readonly object _lock = new object();
             private bool _disposed;

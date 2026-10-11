@@ -10,6 +10,25 @@ namespace EmbyCredits.Services.Utilities
 {
     public static class ItemLookupHelper
     {
+        public static bool IsRemovedFromLibrary(ILibraryManager? libraryManager, BaseItem item)
+        {
+            try
+            {
+                if (libraryManager != null && libraryManager.GetItemById(item.Id) == null)
+                    return true;
+
+                var path = FFmpegHelper.NormalizeFilePath(item.Path);
+                if (string.IsNullOrEmpty(path) || path.Contains("://"))
+                    return false;
+
+                return !System.IO.File.Exists(path);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         public static bool IsSpecialEpisode(Episode episode)
         {
             return episode.ParentIndexNumber == null || episode.ParentIndexNumber == 0;

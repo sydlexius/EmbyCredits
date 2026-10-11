@@ -5,6 +5,7 @@ using System.Reflection;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Common.Plugins;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.LiveTv;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Notifications;
 using MediaBrowser.Controller.Persistence;
@@ -41,6 +42,7 @@ namespace EmbyCredits
         public static PendingEpisodesService? PendingEpisodesService { get; private set; }
         public static INotificationManager? NotificationManager { get; private set; }
         public static ISessionManager? SessionManager { get; private set; }
+        public static ILiveTvManager? LiveTvManager { get; private set; }
 
         public IApplicationPaths AppPaths => _appPaths;
 
@@ -48,7 +50,7 @@ namespace EmbyCredits
         public override string Description => "Automatically detects end credits in TV shows and saves timestamps to files.";
         public override Guid Id => Guid.Parse("b1a65a73-a620-432a-9f5b-285038031c26");
 
-        public Plugin(IApplicationPaths appPaths, IXmlSerializer xmlSerializer, ILogManager logManager, ILibraryManager libraryManager, IItemRepository itemRepository, IFfmpegManager ffmpegManager, IMediaEncoder mediaEncoder, INotificationManager notificationManager, ISessionManager sessionManager)
+        public Plugin(IApplicationPaths appPaths, IXmlSerializer xmlSerializer, ILogManager logManager, ILibraryManager libraryManager, IItemRepository itemRepository, IFfmpegManager ffmpegManager, IMediaEncoder mediaEncoder, INotificationManager notificationManager, ISessionManager sessionManager, ILiveTvManager liveTvManager)
             : base(appPaths, xmlSerializer)
         {
             Instance = this;
@@ -61,6 +63,7 @@ namespace EmbyCredits
             _notificationManager = notificationManager;
             NotificationManager = notificationManager;
             SessionManager = sessionManager;
+            LiveTvManager = liveTvManager;
         }
         
         public override void SaveConfiguration()

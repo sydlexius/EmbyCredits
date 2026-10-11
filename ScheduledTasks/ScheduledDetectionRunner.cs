@@ -10,6 +10,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using EmbyCredits.Services;
+using EmbyCredits.Services.Utilities;
 
 namespace EmbyCredits.ScheduledTasks
 {
@@ -189,6 +190,13 @@ namespace EmbyCredits.ScheduledTasks
             IProgress<double> progress,
             CancellationToken cancellationToken)
         {
+            var stillWriting = episodesToProcess.Where(FileWriteGuard.IsBeingWritten).ToList();
+            if (stillWriting.Count > 0)
+            {
+                logger.Info($"Skipping {stillWriting.Count} episode(s) that are still being recorded or written - they will be picked up on a later run");
+                episodesToProcess = episodesToProcess.Except(stillWriting).ToList();
+            }
+
             var targetIds = new HashSet<string>(episodesToProcess.Select(e => e.Id.ToString()));
 
             var episodesBySeason = new List<(string SeriesId, int SeasonNumber, List<Episode> Episodes)>();
