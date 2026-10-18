@@ -12,7 +12,7 @@ namespace EmbyCredits.Services
 {
     public class TheIntroDbService : IDisposable
     {
-        private const string ApiBase = "https://api.theintrodb.org/v3/media";
+        private const string ApiBase = "https://api.theintrodb.org/v4/media";
 
         private readonly ILogger _logger;
         private readonly PluginConfiguration _configuration;
@@ -61,10 +61,10 @@ namespace EmbyCredits.Services
 
                 var query = HttpUtility.ParseQueryString(string.Empty);
 
-                if (!string.IsNullOrEmpty(tmdbId))
-                    query["tmdb_id"] = tmdbId;
-                else if (!string.IsNullOrEmpty(tvdbId))
+                if (!string.IsNullOrEmpty(tvdbId))
                     query["tvdb_id"] = tvdbId;
+                else if (!string.IsNullOrEmpty(tmdbId))
+                    query["tmdb_id"] = tmdbId;
                 else
                     query["imdb_id"] = imdbId;
 
